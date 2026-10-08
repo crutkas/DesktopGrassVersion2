@@ -1,15 +1,15 @@
-// Grass.cs - one strip's grass: blades batched into swaying groups, flowers, mushrooms, gusts and cuts.
+// Grass.cs - one strip's grass: blades batched into swaying tiles, flowers, mushrooms, gusts and cuts.
 //
-// Every blade is a filled, tapered CompositionSpriteShape with a shared gradient brush. Blades are batched
-// into ShapeVisual "groups" (one per ~30 DIP segment per depth layer), and groups into ~140 DIP "buckets".
-// Each bucket is rendered once into a CompositionVisualSurface and shown on a SpriteVisual, because DWM
-// re-rasterizes live vector shapes in every dirty region. Motion is a shear about the ground line, which
-// doesn't depend on x, so it composes cleanly at two levels:
-//   - ambient sway: one expression per bucket sprite, driven by the shared Wind phases. Attached only in
-//     Full motion; it just shears the cached texture.
+// Blades are data. Each ~30 DIP segment of a depth layer is a "group": a SpriteVisual showing a tile that
+// Direct2D rasterizes (anti-aliased) with all of the group's blades and flowers. Groups are collected into
+// ~140 DIP "buckets". Motion is a shear about the ground line, which doesn't depend on x, so it composes
+// cleanly at two levels and never touches the pixels:
+//   - ambient sway: one expression per bucket container, driven by the shared Wind phases. Attached
+//     only in Full motion.
 //   - gusts: a damped spring per group (v/p/t on its property set, timed by GustClock), attached only
-//     while that group is springing (its bucket re-renders meanwhile).
-// So at rest in Calm mode nothing is animating at all, and DWM can idle.
+//     while that group is springing.
+// The app redraws a tile only when its blades change (a cut, regrowth, a flower popping, a new palette),
+// so at rest in Calm mode nothing is animating at all and DWM can idle.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -19,8 +19,7 @@ using Windows.UI.Composition;
 
 namespace DesktopGrass.Composition;
 
-internal sealed record GrassConfig(float SegmentWidth = 30f, float FrontSegmentWidth = 48f, float Density = 1f, float BucketWidth = 140f,
-    bool Cache = true);
+internal sealed record GrassConfig(float SegmentWidth = 30f, float FrontSegmentWidth = 48f, float Density = 1f, float BucketWidth = 140f);
 
 internal sealed class GrassField : IDisposable
 {
@@ -35,8 +34,11 @@ internal sealed class GrassField : IDisposable
     private const float MaxFlowerChance = 0.04f;
     private const float MaxMushroomChance = 0.045f;
     private const int FrontLayer = 3;
-    /// <summary>Room around each cached bucket so gust-bent blades aren't cropped (tallest flower at max bend ≈ 40 DIP past its base).</summary>
-    private const float SurfaceMargin = 32f;
+    private const float GradientSpan = 34f;
+    /// <summary>Tile redraw rate while blades are being cut, regrown or popped.</summary>
+    private const double FrameSeconds = 1.0 / 40;
+    /// <summary>How long a new palette takes to sweep across the strip.</summary>
+    private const double WaveSeconds = 1.4;
 
     // Layers 0..2 are behind critters (back, mid, near); layer 3 is the short tufts in front of them.
     private static readonly float[] LayerGain = { 0.85f, 1f, 1.1f, 1.15f };
@@ -55,66 +57,111 @@ internal sealed class GrassField : IDisposable
     private const string MatrixExpression =
         "Matrix4x4(1,0,0,0, -Sin(s.Th),Cos(s.Th),0,0, 0,0,1,0, H*Sin(s.Th),H*(1-Cos(s.Th)),0,1)";
 
-    private static readonly Dictionary<int, CompositionPath> s_paths = new();
+    /// <summary>Blade and petal geometries (Direct2D factory resources shared by every strip).</summary>
+    private static readonly Dictionary<int, IntPtr> s_geometry = new();
     private static CompositionPath[]? s_slivers;
+
+    private enum Ease : byte { Linear, Out, In, InOut, Pop }
+
+    /// <summary>A value the app animates; it only drives tile redraws, so 40 Hz is plenty.</summary>
+    private struct Tween
+    {
+        public float From, To;
+        public double Start, Duration;
+        public Ease Ease;
+
+        public Tween(float value)
+        {
+            From = To = value;
+            Start = Duration = 0;
+            Ease = Ease.Linear;
+        }
+
+        public static Tween Run(float from, float to, double start, double seconds, Ease ease) =>
+            new() { From = from, To = to, Start = start, Duration = seconds, Ease = ease };
+
+        public readonly double End => Start + Duration;
+
+        public readonly float Value(double now)
+        {
+            if (Duration <= 0 || now >= End) return To;
+            if (now <= Start) return From;
+            float t = (float)((now - Start) / Duration);
+            return From + (To - From) * Shape(t, Ease);
+        }
+
+        private static float Shape(float t, Ease e) => e switch
+        {
+            Ease.Out => 1 - (1 - t) * (1 - t) * (1 - t),
+            Ease.In => t * t * t,
+            Ease.InOut => t < 0.5f ? 4 * t * t * t : 1 - MathF.Pow(-2 * t + 2, 3) / 2,
+            Ease.Pop => 1 + 2.70158f * MathF.Pow(t - 1, 3) + 1.70158f * MathF.Pow(t - 1, 2),
+            _ => t,
+        };
+    }
 
     private sealed class Bucket
     {
-        /// <summary>The bucket's groups, in strip DIPs.</summary>
-        public required ContainerVisual Content;
-        /// <summary>When cached: the unparented root a VisualSurface renders (Content sits inside, scaled to device pixels).</summary>
-        public ContainerVisual? Source;
+        public required ContainerVisual Visual;
         public float CenterX;
         public int Layer;
         public float P1, P2;
-        public float Left = float.MaxValue, Right = float.MinValue;
-        public SpriteVisual? Sprite;
-        public CompositionVisualSurface? Surface;
-        public CompositionSurfaceBrush? Brush;
-        /// <summary>Ground line in the swaying visual's local DIPs.</summary>
-        public float Pivot;
-        /// <summary>What ambient sway shears: the cached sprite, or the live content when caching is off.</summary>
-        public Visual Swayer => Sprite != null ? Sprite : Content;
     }
 
     private sealed class Group
     {
-        public required ShapeVisual Visual;
+        public required SpriteVisual Visual;
         public required CompositionPropertySet Props;
+        public required Canvas Canvas;
+        public required CompositionSurfaceBrush Brush;
         public float Left, CenterX;
+        /// <summary>Where the group's origin sits inside its tile (DIPs), after snapping the tile to whole pixels.</summary>
+        public float Dx;
         public int Layer;
         public float V, P, T;
         public bool Active;
+        public readonly List<Blade> Blades = new();
+        public Palette? Palette;
+        public bool Stale;
+        public double DrawnAt = double.NegativeInfinity;
     }
 
     private sealed class Flower
     {
-        public required CompositionContainerShape Head;
-        public int Color;
-        public float Rank, Radius;
-        public Vector2 Tip;
+        public int Color, Petals;
+        public float Rank, Radius, Angle;
+        /// <summary>Head center relative to the blade base point, at full stem height.</summary>
+        public Vector2 Head;
         public bool Visible = true;
+        public Tween Scale = new(1f);
     }
 
     private sealed class Blade
     {
-        public required CompositionShape Shape;
-        public float X, Length;
-        public int Depth, Hue, Serial;
+        public required Group Group;
+        public float X, LocalX, Length;
+        public int Depth, Hue, Serial, Geometry;
         public bool Cut;
+        public Tween Scale = new(1f);
         public Flower? Flower;
     }
 
     private sealed class Mushroom
     {
-        public required CompositionContainerShape Shape;
-        public float X, CapRadius, Height, Rank;
+        public required SpriteVisual Visual;
+        public required Canvas Canvas;
+        public required CompositionSurfaceBrush Brush;
+        public IntPtr Cap;
+        /// <summary>The mushroom's base point inside its tile (DIPs).</summary>
+        public Vector2 Base;
+        public float X, CapRadius, CapHeight, StemHeight, StemWidth, Height, Rank;
+        public int Color;
         public bool Visible = true;
+        public Palette? Palette;
     }
 
     private readonly Strip _strip;
     private readonly GustClock _clock;
-    private readonly GrassBrushes _brushes;
     private readonly Scheduler _scheduler;
     private readonly Rng _rng;
     private readonly GrassConfig _config;
@@ -124,15 +171,17 @@ internal sealed class GrassField : IDisposable
     private readonly List<Group> _active = new();
     private readonly List<Bucket> _buckets = new();
     private readonly Dictionary<long, Bucket> _bucketIndex = new();
+    private readonly HashSet<Group> _animating = new();
+    private readonly List<Group> _settled = new();
     private readonly ContainerVisual[] _layers = new ContainerVisual[4];
-    private readonly ShapeVisual _mushroomVisual;
-    private readonly ContainerVisual? _mushroomSource;
-    private readonly SpriteVisual? _mushroomSprite;
-    private readonly CompositionVisualSurface? _mushroomSurface;
-    private readonly CompositionSurfaceBrush? _mushroomBrush;
+    private readonly ContainerVisual _mushroomLayer;
     private readonly SpriteVisual _turf;
     private readonly ExpressionAnimation _theta, _matrix, _sway;
-    private TimerToken? _ambientToken;
+    /// <summary>Where group-local y = 0 sits inside every tile (DIPs), after pixel snapping.</summary>
+    private readonly float _tileDy;
+    private Palette _palette;
+    private TimerToken? _ambientToken, _frameToken;
+    private int _wave;
     private bool _ambientOn, _disposed;
 
     public int BladeCount => _blades.Count;
@@ -140,16 +189,20 @@ internal sealed class GrassField : IDisposable
     public int MushroomCount => _mushrooms.Count;
     public int ActiveGroups => _active.Count;
 
-    public GrassField(Strip strip, Wind wind, GustClock clock, GrassBrushes brushes, Scheduler scheduler, Rng rng, GrassConfig config)
+    public GrassField(Strip strip, Wind wind, GustClock clock, Palette palette, Scheduler scheduler, Rng rng, GrassConfig config, CompositionBrush turf)
     {
         var sw = Stopwatch.StartNew();
         _strip = strip;
         _clock = clock;
-        _brushes = brushes;
+        _palette = palette;
         _scheduler = scheduler;
         _rng = rng;
         _config = config;
         var c = Anim.C;
+
+        float k = strip.Scale;
+        float top = strip.GroundY - G;
+        _tileDy = top - MathF.Floor(top * k) / k;
 
         _theta = c.CreateExpressionAnimation(ThetaExpression);
         _theta.SetReferenceParameter("K", clock.Set);
@@ -158,41 +211,30 @@ internal sealed class GrassField : IDisposable
         _theta.SetScalarParameter("Kb", MathF.Exp(-GustClock.Decay));
         _theta.SetScalarParameter("Kw", GustClock.Omega);
         _matrix = c.CreateExpressionAnimation(MatrixExpression);
-        _matrix.SetScalarParameter("H", G);
+        _matrix.SetScalarParameter("H", G + _tileDy); // the ground line inside a tile
         _sway = c.CreateExpressionAnimation(BucketExpression);
         _sway.SetReferenceParameter("W", wind.Set);
         _sway.SetScalarParameter("M", MaxTheta);
+        _sway.SetScalarParameter("H", strip.GroundY);
 
         _turf = c.CreateSpriteVisual();
         _turf.Size = new Vector2(strip.Width, 5);
         _turf.Offset = new Vector3(0, strip.GroundY - 5, 0);
-        _turf.Brush = brushes.Turf;
+        _turf.Brush = turf;
         strip.BackGrass.Children.InsertAtTop(_turf);
         _layers[0] = Layer(strip.BackGrass);
-        var mushroomSlot = c.CreateContainerVisual();
-        strip.BackGrass.Children.InsertAtTop(mushroomSlot);
-        _mushroomVisual = Shapes.Visual(strip.Width, G + 1, new Vector2(0, strip.GroundY - G));
+        _mushroomLayer = c.CreateContainerVisual();
+        strip.BackGrass.Children.InsertAtTop(_mushroomLayer);
         _layers[1] = Layer(strip.BackGrass);
         _layers[2] = Layer(strip.BackGrass);
         _layers[FrontLayer] = Layer(strip.FrontGrass);
 
         Generate();
-        if (config.Cache)
-        {
-            FinishBuckets();
-            var (source, content) = SourceTree();
-            content.Children.InsertAtTop(_mushroomVisual);
-            _mushroomSource = source;
-            (_mushroomSprite, _mushroomSurface, _mushroomBrush, _) = Cached(source, 0, strip.Width);
-            mushroomSlot.Children.InsertAtTop(_mushroomSprite);
-        }
-        else
-        {
-            mushroomSlot.Children.InsertAtTop(_mushroomVisual);
-        }
         _clock.Stopped += OnClockStopped;
-        ApplyPalette(brushes.Palette, animate: false);
-        Log.Write($"grass: {_blades.Count} blades, {_groups.Count} groups, {_buckets.Count} sway buckets, {_mushrooms.Count} mushrooms, {s_paths.Count} cached paths in {sw.ElapsedMilliseconds} ms");
+        long generated = sw.ElapsedMilliseconds;
+        ApplyPalette(palette, animate: false);
+        Log.Write($"grass: {_blades.Count} blades in {_groups.Count} tiles, {_buckets.Count} sway buckets, {_mushrooms.Count} mushrooms; " +
+            $"built in {generated} ms, rasterized in {sw.ElapsedMilliseconds - generated} ms");
     }
 
     private ContainerVisual Layer(ContainerVisual parent)
@@ -236,7 +278,6 @@ internal sealed class GrassField : IDisposable
 
         _blades.Sort((a, b) => a.X.CompareTo(b.X));
         _groups.Sort((a, b) => a.CenterX.CompareTo(b.CenterX));
-        foreach (var g in _groups) StartGroup(g);
     }
 
     private Group GroupFor(Dictionary<long, Group> groups, int layer, float x)
@@ -248,20 +289,43 @@ internal sealed class GrassField : IDisposable
         long key = ((long)layer << 32) | (uint)index;
         if (groups.TryGetValue(key, out var g)) return g;
 
+        // The tile is snapped to whole device pixels so the texture maps 1:1 onto the screen.
+        float k = _strip.Scale;
         float left = origin + index * segW - Pad;
+        float x0 = MathF.Floor(left * k) / k, y0 = _strip.GroundY - G - _tileDy;
+        float dx = left - x0;
+        int widthPx = (int)MathF.Ceiling((segW + 2 * Pad + dx) * k), heightPx = (int)MathF.Ceiling((G + 1 + _tileDy) * k);
+        var canvas = new Canvas(widthPx, heightPx);
+        var brush = Anim.C.CreateSurfaceBrush(canvas.Surface);
+        brush.Stretch = CompositionStretch.Fill;
+        var visual = Anim.C.CreateSpriteVisual();
+        visual.Brush = brush;
+        visual.Size = new Vector2(widthPx / k, heightPx / k);
+        visual.Offset = new Vector3(x0, y0, 0);
+
         float centerX = origin + (index + 0.5f) * segW;
-        var visual = Shapes.Visual(segW + 2 * Pad, G + 1, new Vector2(left, _strip.GroundY - G));
-        g = new Group { Visual = visual, Props = visual.Properties, Left = left, CenterX = centerX, Layer = layer };
+        g = new Group
+        {
+            Visual = visual,
+            Props = visual.Properties,
+            Canvas = canvas,
+            Brush = brush,
+            Left = left,
+            CenterX = centerX,
+            Dx = dx,
+            Layer = layer,
+        };
+        g.Props.InsertScalar("v", 0);
+        g.Props.InsertScalar("p", 0);
+        g.Props.InsertScalar("t", 0);
+        g.Props.InsertScalar("Th", 0);
         groups[key] = g;
         _groups.Add(g);
-        var bucket = BucketFor(layer, centerX);
-        bucket.Content.Children.InsertAtTop(visual);
-        bucket.Left = MathF.Min(bucket.Left, left);
-        bucket.Right = MathF.Max(bucket.Right, left + segW + 2 * Pad);
+        BucketFor(layer, centerX).Visual.Children.InsertAtTop(visual);
         return g;
     }
 
-    /// <summary>The ambient-sway bucket for a layer position (bucket grids are staggered per layer).</summary>
+    /// <summary>The ambient-sway container for a layer position (bucket grids are staggered per layer).</summary>
     private Bucket BucketFor(int layer, float x)
     {
         float width = Math.Max(40f, _config.BucketWidth);
@@ -269,23 +333,12 @@ internal sealed class GrassField : IDisposable
         int index = (int)MathF.Floor((x - origin) / width);
         long key = ((long)layer << 32) | (uint)index;
         if (_bucketIndex.TryGetValue(key, out var b)) return b;
+        var v = Anim.C.CreateContainerVisual();
+        _layers[layer].Children.InsertAtTop(v);
         float center = origin + (index + 0.5f) * width;
-        ContainerVisual content;
-        ContainerVisual? source = null;
-        if (_config.Cache)
-        {
-            (source, content) = SourceTree();
-        }
-        else
-        {
-            content = Anim.C.CreateContainerVisual();
-            _layers[layer].Children.InsertAtTop(content);
-        }
         b = new Bucket
         {
-            Content = content,
-            Source = source,
-            Pivot = _strip.GroundY,
+            Visual = v,
             CenterX = center,
             Layer = layer,
             P1 = center / 140f + layer * 0.9f + _rng.Range(0f, 0.8f),
@@ -294,70 +347,6 @@ internal sealed class GrassField : IDisposable
         _bucketIndex[key] = b;
         _buckets.Add(b);
         return b;
-    }
-
-    /// <summary>
-    /// Shows each bucket through a cached texture. DWM re-rasterizes ShapeVisual vector content whenever it
-    /// falls in a dirty region (anything moving nearby), so static grass lives in a VisualSurface: it
-    /// re-renders only while its own blades change, and ambient sway just shears the texture.
-    /// </summary>
-    private void FinishBuckets()
-    {
-        foreach (var b in _buckets)
-        {
-            (b.Sprite, b.Surface, b.Brush, b.Pivot) = Cached(b.Source!, b.Left - SurfaceMargin, b.Right + SurfaceMargin);
-            _layers[b.Layer].Children.InsertAtTop(b.Sprite);
-        }
-    }
-
-    /// <summary>Device pixels per DIP on this strip's monitor; cached sources are laid out in device pixels.</summary>
-    private float CacheScale => _strip.Scale;
-
-    /// <summary>
-    /// An unparented root for a VisualSurface. The surface ignores the root's own transform, so a child
-    /// scales the DIP content to device pixels and the texture maps 1:1 onto the screen.
-    /// </summary>
-    private (ContainerVisual Root, ContainerVisual Content) SourceTree()
-    {
-        var root = Anim.C.CreateContainerVisual();
-        var content = Anim.C.CreateContainerVisual();
-        float k = CacheScale;
-        content.Scale = new Vector3(k, k, 1);
-        root.Children.InsertAtTop(content);
-        return (root, content);
-    }
-
-    /// <summary>
-    /// A sprite showing the grass band of <paramref name="source"/> between <paramref name="left"/> and
-    /// <paramref name="right"/> (DIPs), snapped to whole device pixels so the texture isn't resampled.
-    /// Returns the ground line in the sprite's local DIPs (the sway pivot).
-    /// </summary>
-    private (SpriteVisual Sprite, CompositionVisualSurface Surface, CompositionSurfaceBrush Brush, float Pivot) Cached(Visual source, float left, float right)
-    {
-        var c = Anim.C;
-        float k = CacheScale;
-        float x0 = MathF.Floor(left * k), x1 = MathF.Ceiling(right * k);
-        float y0 = MathF.Floor((_strip.GroundY - G - 2f) * k), y1 = MathF.Ceiling((_strip.GroundY + 2f) * k);
-        var surface = c.CreateVisualSurface();
-        surface.SourceVisual = source;
-        surface.SourceOffset = new Vector2(x0, y0);
-        surface.SourceSize = new Vector2(x1 - x0, y1 - y0);
-        var brush = c.CreateSurfaceBrush(surface);
-        brush.Stretch = CompositionStretch.Fill;
-        var sprite = c.CreateSpriteVisual();
-        sprite.Brush = brush;
-        sprite.Size = new Vector2((x1 - x0) / k, (y1 - y0) / k);
-        sprite.Offset = new Vector3(x0 / k, y0 / k, 0);
-        return (sprite, surface, brush, _strip.GroundY - y0 / k);
-    }
-
-    private void StartGroup(Group g)
-    {
-        var p = g.Props;
-        p.InsertScalar("v", 0);
-        p.InsertScalar("p", 0);
-        p.InsertScalar("t", 0);
-        p.InsertScalar("Th", 0);
     }
 
     /// <summary>Ambient sway on or off. Turning it off waits for the wind's fade-out, then detaches every expression.</summary>
@@ -379,8 +368,7 @@ internal sealed class GrassField : IDisposable
                 _sway.SetScalarParameter("p1", b.P1);
                 _sway.SetScalarParameter("p2", b.P2);
                 _sway.SetScalarParameter("xk", b.CenterX / 260f);
-                _sway.SetScalarParameter("H", b.Pivot);
-                b.Swayer.StartAnimation("TransformMatrix", _sway);
+                b.Visual.StartAnimation("TransformMatrix", _sway);
             }
             return;
         }
@@ -391,80 +379,65 @@ internal sealed class GrassField : IDisposable
             _ambientOn = false;
             foreach (var b in _buckets)
             {
-                b.Swayer.StopAnimation("TransformMatrix");
-                b.Swayer.TransformMatrix = Matrix4x4.Identity;
+                b.Visual.StopAnimation("TransformMatrix");
+                b.Visual.TransformMatrix = Matrix4x4.Identity;
             }
         });
     }
 
     private void AddBlade(Dictionary<long, Group> groups, int layer, float x, float length, int hue, bool flower)
     {
-        var c = Anim.C;
         var g = GroupFor(groups, layer, x);
-        float localX = x - g.Left;
-        int depth = Math.Min(layer, 2);
-        var brush = _brushes.Blade[depth, hue];
-        Blade blade;
+        var blade = new Blade { Group = g, X = x, LocalX = x - g.Left, Depth = Math.Min(layer, 2), Hue = hue };
         if (!flower)
         {
-            var shape = c.CreateSpriteShape(c.CreatePathGeometry(BladePath((int)MathF.Round(length), _rng.Int(-3, 4), _rng.Int(1, 4))));
-            shape.FillBrush = brush;
-            shape.Offset = new Vector2(localX, 0);
-            shape.CenterPoint = new Vector2(0, G);
-            blade = new Blade { Shape = shape, X = x, Length = length, Depth = depth, Hue = hue };
+            blade.Length = length;
+            blade.Geometry = BladePath((int)MathF.Round(length), _rng.Int(-3, 4), _rng.Int(1, 4));
         }
         else
         {
             int stemLength = (int)MathF.Round(MathF.Min(45f, length * _rng.Range(1.2f, 1.5f)));
             int curve = _rng.Int(-1, 2);
-            var container = c.CreateContainerShape();
-            container.Offset = new Vector2(localX, 0);
-            container.CenterPoint = new Vector2(0, G);
-            var stem = c.CreateSpriteShape(c.CreatePathGeometry(BladePath(stemLength, curve, 0)));
-            stem.FillBrush = brush;
-            container.Shapes.Add(stem);
-
             float radius = _rng.Range(2.2f, 3.4f);
-            int color = _rng.Int(0, 6);
-            var head = c.CreateContainerShape();
-            head.Offset = new Vector2(curve * 0.065f * stemLength, G - stemLength);
-            head.RotationAngleInDegrees = _rng.Range(0f, 72f);
-            var petals = c.CreateSpriteShape(c.CreatePathGeometry(PetalsPath(radius)));
-            petals.FillBrush = _brushes.Petal[color];
-            head.Shapes.Add(petals);
-            head.Shapes.Add(Shapes.Circle(0, 0, radius * 0.36f, _brushes.FlowerCenter));
-            container.Shapes.Add(head);
-
-            blade = new Blade { Shape = container, X = x, Length = stemLength, Depth = depth, Hue = hue };
-            blade.Flower = new Flower { Head = head, Color = color, Rank = _rng.Next(), Radius = radius, Tip = head.Offset };
+            blade.Length = stemLength;
+            blade.Geometry = BladePath(stemLength, curve, 0);
+            blade.Flower = new Flower
+            {
+                Color = _rng.Int(0, 6),
+                Angle = _rng.Range(0f, 72f) * MathF.PI / 180f,
+                Rank = _rng.Next(),
+                Petals = PetalsPath(radius),
+                Radius = radius,
+                Head = new Vector2(curve * 0.065f * stemLength, G - stemLength),
+            };
         }
-        g.Visual.Shapes.Add(blade.Shape);
+        g.Blades.Add(blade);
         _blades.Add(blade);
     }
 
     /// <summary>Tapered blade with its base centered at (0, G); cached by quantized length/curve/width.</summary>
-    private static CompositionPath BladePath(int length, int curve, int width)
+    private static int BladePath(int length, int curve, int width)
     {
         int key = length * 100 + (curve + 3) * 10 + width;
-        if (s_paths.TryGetValue(key, out var path)) return path;
+        if (s_geometry.ContainsKey(key)) return key;
         float l = length;
         float w = (width == 0 ? 0.62f : 0.7f + 0.35f * width) * (0.85f + 0.3f * MathF.Min(l, 30f) / 30f);
         float c = curve * 0.065f * l;
-        path = new PathBuilder()
+        s_geometry[key] = new PathBuilder()
             .MoveTo(-w, G)
             .CubicTo(-0.9f * w, G - 0.45f * l, 0.55f * c - 0.25f * w, G - 0.85f * l, c, G - l)
             .CubicTo(0.55f * c + 0.25f * w, G - 0.85f * l, 0.9f * w, G - 0.45f * l, w, G)
             .Close()
-            .Build();
-        s_paths[key] = path;
-        return path;
+            .BuildD2D();
+        return key;
     }
 
-    private static CompositionPath PetalsPath(float radius)
+    /// <summary>Five round petals around the origin.</summary>
+    private static int PetalsPath(float radius)
     {
         int bucket = (int)MathF.Round(radius * 5);
         int key = -1 - bucket;
-        if (s_paths.TryGetValue(key, out var path)) return path;
+        if (s_geometry.ContainsKey(key)) return key;
         float r = bucket / 5f;
         var pb = new PathBuilder(winding: true);
         for (int k = 0; k < 5; k++)
@@ -472,9 +445,8 @@ internal sealed class GrassField : IDisposable
             float a = k * MathF.Tau / 5 - MathF.PI / 2;
             pb.Circle(MathF.Cos(a) * 0.62f * r, MathF.Sin(a) * 0.62f * r, 0.5f * r);
         }
-        path = pb.Build();
-        s_paths[key] = path;
-        return path;
+        s_geometry[key] = pb.BuildD2D();
+        return key;
     }
 
     private void AddMushroom(float x)
@@ -483,24 +455,141 @@ internal sealed class GrassField : IDisposable
         float capH = _rng.Range(2.6f, 4.8f);
         float stemH = _rng.Range(3.5f, 8f);
         float stemW = _rng.Range(2f, 3.6f);
-        int cap = _rng.Int(0, 6);
+        int color = _rng.Int(0, 6);
 
-        var m = Anim.C.CreateContainerShape();
-        m.Offset = new Vector2(x, G);
-        m.Shapes.Add(Shapes.ContactShadow(0, 0, capR * 1.1f, 1.5f, 60));
-        m.Shapes.Add(Shapes.RoundRect(-stemW / 2, -stemH - 0.6f, stemW, stemH + 0.6f, stemW * 0.45f, _brushes.Stem));
-        m.Shapes.Add(Shapes.Ellipse(0, -stemH, capR * 0.82f, 0.9f, Shapes.Solid(0x000000, 45)));
-        m.Shapes.Add(Shapes.Path(new PathBuilder().MoveTo(-capR, -stemH).ArcTo(capR, -stemH, capR, capH, clockwise: true).Close(), _brushes.Cap[cap]));
-        m.Shapes.Add(Shapes.Ellipse(-capR * 0.35f, -stemH - capH * 0.62f, capR * 0.3f, capH * 0.15f, Shapes.Solid(0xFFFFFF, 80)));
-        if (cap == 0 || cap == 4)
+        // Tile: the cap and its shadow with a little room, snapped to whole pixels like the grass.
+        float k = _strip.Scale;
+        float halfW = capR * 1.1f + 2f;
+        float left = x - halfW, top = _strip.GroundY - stemH - capH - 2f, bottom = _strip.GroundY + 2.5f;
+        float x0 = MathF.Floor(left * k) / k, y0 = MathF.Floor(top * k) / k;
+        int widthPx = (int)MathF.Ceiling((left + 2 * halfW - x0) * k), heightPx = (int)MathF.Ceiling((bottom - y0) * k);
+        var canvas = new Canvas(widthPx, heightPx);
+        var brush = Anim.C.CreateSurfaceBrush(canvas.Surface);
+        brush.Stretch = CompositionStretch.Fill;
+        var visual = Anim.C.CreateSpriteVisual();
+        visual.Brush = brush;
+        visual.Size = new Vector2(widthPx / k, heightPx / k);
+        visual.Offset = new Vector3(x0, y0, 0);
+        var basePoint = new Vector2(x - x0, _strip.GroundY - y0);
+        visual.CenterPoint = new Vector3(basePoint, 0);
+        _mushroomLayer.Children.InsertAtTop(visual);
+
+        _mushrooms.Add(new Mushroom
         {
-            var spot = Shapes.Solid(0xFFFFFF, 225);
-            m.Shapes.Add(Shapes.Circle(-capR * 0.45f, -stemH - capH * 0.4f, capR * 0.13f, spot));
-            m.Shapes.Add(Shapes.Circle(capR * 0.38f, -stemH - capH * 0.55f, capR * 0.15f, spot));
-            m.Shapes.Add(Shapes.Circle(capR * 0.02f, -stemH - capH * 0.82f, capR * 0.11f, spot));
+            Visual = visual,
+            Canvas = canvas,
+            Brush = brush,
+            Cap = new PathBuilder().MoveTo(-capR, -stemH).ArcTo(capR, -stemH, capR, capH, clockwise: true).Close().BuildD2D(),
+            Base = basePoint,
+            X = x,
+            CapRadius = capR,
+            CapHeight = capH,
+            StemHeight = stemH,
+            StemWidth = stemW,
+            Height = stemH + capH,
+            Rank = _rng.Next(),
+            Color = color,
+        });
+    }
+
+    // ---------------------------------------------------------------- drawing
+
+    private void Draw(Group g, double now)
+    {
+        g.Stale = false;
+        g.DrawnAt = now;
+        var palette = g.Palette ?? _palette;
+        var toPixels = Matrix3x2.CreateTranslation(g.Dx, _tileDy) * Matrix3x2.CreateScale(_strip.Scale);
+        g.Canvas.Draw(p =>
+        {
+            foreach (var b in g.Blades) DrawBlade(p, b, palette, toPixels, now);
+        });
+    }
+
+    private static void DrawBlade(Painter p, Blade b, Palette palette, Matrix3x2 toPixels, double now)
+    {
+        float s = b.Scale.Value(now);
+        var placed = Matrix3x2.CreateTranslation(b.LocalX, 0) * toPixels;
+        var (baseColor, tipColor) = GrassBrushes.Colors(palette, b.Depth, b.Hue);
+        p.Transform(Matrix3x2.CreateScale(1, s, new Vector2(0, G)) * placed);
+        p.Fill(s_geometry[b.Geometry], p.Linear(baseColor, tipColor, new Vector2(0, G), new Vector2(0, G - GradientSpan)));
+
+        if (b.Flower is not { } f) return;
+        float hs = f.Scale.Value(now);
+        if (hs <= 0.01f) return;
+        // The head rides on the (possibly shortened) stem tip.
+        var head = new Vector2(f.Head.X, G + (f.Head.Y - G) * s);
+        p.Transform(Matrix3x2.CreateScale(hs) * Matrix3x2.CreateRotation(f.Angle) * Matrix3x2.CreateTranslation(head) * placed);
+        p.Fill(s_geometry[f.Petals], p.Solid(palette.Flowers[f.Color]));
+        float r = f.Radius * 0.36f;
+        p.Ellipse(0, 0, r, r, p.Solid(palette.FlowerCenter));
+    }
+
+    private void Draw(Mushroom m)
+    {
+        var palette = m.Palette ?? _palette;
+        var toPixels = Matrix3x2.CreateTranslation(m.Base) * Matrix3x2.CreateScale(_strip.Scale);
+        m.Canvas.Draw(p =>
+        {
+            float capR = m.CapRadius, capH = m.CapHeight, stemH = m.StemHeight, stemW = m.StemWidth;
+            p.Transform(Matrix3x2.CreateScale(capR * 1.1f, 1.5f) * toPixels);
+            p.Ellipse(0, 0, 1, 1, p.UnitShadow(Anim.Hex(0x10160A, 60)));
+            p.Transform(toPixels);
+            p.RoundRect(-stemW / 2, -stemH - 0.6f, stemW, stemH + 0.6f, stemW * 0.45f, p.Solid(palette.Stem));
+            p.Ellipse(0, -stemH, capR * 0.82f, 0.9f, p.Solid(Anim.Hex(0x000000, 45)));
+            p.Fill(m.Cap, p.Solid(palette.Caps[m.Color]));
+            p.Ellipse(-capR * 0.35f, -stemH - capH * 0.62f, capR * 0.3f, capH * 0.15f, p.Solid(Anim.Hex(0xFFFFFF, 80)));
+            if (m.Color is 0 or 4)
+            {
+                var spot = p.Solid(Anim.Hex(0xFFFFFF, 225));
+                p.Ellipse(-capR * 0.45f, -stemH - capH * 0.4f, capR * 0.13f, capR * 0.13f, spot);
+                p.Ellipse(capR * 0.38f, -stemH - capH * 0.55f, capR * 0.15f, capR * 0.15f, spot);
+                p.Ellipse(capR * 0.02f, -stemH - capH * 0.82f, capR * 0.11f, capR * 0.11f, spot);
+            }
+        });
+    }
+
+    /// <summary>Keeps redrawing <paramref name="g"/> until its blades and flowers stop changing.</summary>
+    private void Animate(Group g)
+    {
+        if (_disposed) return;
+        g.Stale = true;
+        _animating.Add(g);
+        if (_frameToken is not { Pending: true }) _frameToken = _scheduler.After(0, Frame);
+    }
+
+    private void Frame()
+    {
+        if (_disposed) return;
+        double now = Clock.Now;
+        _settled.Clear();
+        foreach (var g in _animating)
+        {
+            var (changed, pending) = Progress(g, now);
+            if (changed) Draw(g, now);
+            if (!pending) _settled.Add(g);
         }
-        _mushroomVisual.Shapes.Add(m);
-        _mushrooms.Add(new Mushroom { Shape = m, X = x, CapRadius = capR, Height = stemH + capH, Rank = _rng.Next() });
+        foreach (var g in _settled) _animating.Remove(g);
+        if (_animating.Count > 0) _frameToken = _scheduler.After(FrameSeconds, Frame);
+    }
+
+    /// <summary>Whether the group looks different than when it was last drawn, and whether it will change again.</summary>
+    private static (bool Changed, bool Pending) Progress(Group g, double now)
+    {
+        bool changed = g.Stale, pending = false;
+        foreach (var b in g.Blades)
+        {
+            Check(b.Scale);
+            if (b.Flower is { } f) Check(f.Scale);
+        }
+        return (changed, pending);
+
+        void Check(in Tween t)
+        {
+            if (t.Duration <= 0) return;
+            if (t.Start <= now && t.End > g.DrawnAt) changed = true;
+            if (t.End > now) pending = true;
+        }
     }
 
     // ---------------------------------------------------------------- scenes
@@ -508,55 +597,103 @@ internal sealed class GrassField : IDisposable
     public void ApplyPalette(Palette palette, bool animate)
     {
         if (_disposed) return;
+        _palette = palette;
         float flowerCut = palette.FlowerChance / MaxFlowerChance;
-        foreach (var b in _blades)
+        float mushroomCut = palette.MushroomChance / MaxMushroomChance;
+        double now = Clock.Now;
+
+        if (!animate)
+        {
+            _wave++;
+            foreach (var g in _groups)
+            {
+                g.Palette = palette;
+                foreach (var b in g.Blades)
+                {
+                    if (b.Flower is not { } f) continue;
+                    f.Visible = f.Rank < flowerCut;
+                    f.Scale = new Tween(f.Visible && !b.Cut ? 1f : 0f);
+                }
+                Draw(g, now);
+            }
+            foreach (var m in _mushrooms)
+            {
+                m.Palette = palette;
+                m.Visible = m.Rank < mushroomCut;
+                SetPresence(m.Visual, m.Visible, animate: false);
+                Draw(m);
+            }
+            foreach (var layer in _layers) layer.Scale = new Vector3(1, palette.GrassHeight, 1);
+            return;
+        }
+
+        // Sweep the new palette across the strip, left to right.
+        int wave = ++_wave;
+        foreach (var g in _groups)
+        {
+            double at = WaveSeconds * Math.Clamp(g.CenterX / _strip.Width, 0f, 1f) + _rng.Range(0f, 0.08f);
+            _scheduler.After(at, () =>
+            {
+                if (!_disposed && wave == _wave) Repaint(g, palette, flowerCut);
+            });
+        }
+        foreach (var m in _mushrooms)
+        {
+            double at = WaveSeconds * Math.Clamp(m.X / _strip.Width, 0f, 1f);
+            _scheduler.After(at, () =>
+            {
+                if (_disposed || wave != _wave) return;
+                m.Palette = palette;
+                Draw(m);
+                bool visible = m.Rank < mushroomCut;
+                if (visible == m.Visible) return;
+                m.Visible = visible;
+                SetPresence(m.Visual, visible, animate: true);
+            });
+        }
+        foreach (var layer in _layers) layer.StartAnimation("Scale.Y", Anim.Scalar(1.6, Anim.EaseInOut, 1f, palette.GrassHeight));
+    }
+
+    private void Repaint(Group g, Palette palette, float flowerCut)
+    {
+        g.Palette = palette;
+        double now = Clock.Now;
+        foreach (var b in g.Blades)
         {
             if (b.Flower is not { } f) continue;
             bool visible = f.Rank < flowerCut;
             if (visible == f.Visible) continue;
             f.Visible = visible;
             if (b.Cut) continue; // the head is already gone; regrowth pops it back if still visible
-            SetPresence(f.Head, visible, animate);
+            f.Scale = visible
+                ? Tween.Run(0f, 1f, now + _rng.Range(0f, 0.4f), 0.45, Ease.Pop)
+                : Tween.Run(f.Scale.Value(now), 0f, now, 0.3, Ease.In);
         }
-
-        float mushroomCut = palette.MushroomChance / MaxMushroomChance;
-        foreach (var m in _mushrooms)
-        {
-            bool visible = m.Rank < mushroomCut;
-            if (visible == m.Visible) continue;
-            m.Visible = visible;
-            SetPresence(m.Shape, visible, animate);
-        }
-
-        for (int i = 0; i < _layers.Length; i++)
-        {
-            if (animate) _layers[i].StartAnimation("Scale.Y", Anim.Scalar(1.6, Anim.EaseInOut, 1f, palette.GrassHeight));
-            else _layers[i].Scale = new Vector3(1, palette.GrassHeight, 1);
-        }
+        Animate(g);
     }
 
-    private void SetPresence(CompositionShape shape, bool visible, bool animate)
+    private void SetPresence(Visual v, bool visible, bool animate)
     {
+        var hidden = new Vector3(0, 0, 1);
         if (!animate)
         {
-            shape.StopAnimation("Scale");
-            shape.Scale = visible ? Vector2.One : Vector2.Zero;
+            v.StopAnimation("Scale");
+            v.Scale = visible ? Vector3.One : hidden;
             return;
         }
-        if (visible) Pop(shape, _rng.Range(0.2f, 1.4f));
-        else shape.StartAnimation("Scale", Anim.Vec2(0.35, Anim.EaseIn, (1f, Vector2.Zero)));
-    }
-
-    private static void Pop(CompositionShape shape, double delay)
-    {
-        var a = Anim.C.CreateVector2KeyFrameAnimation();
+        if (!visible)
+        {
+            v.StartAnimation("Scale", Anim.Vec3(0.35, Anim.EaseIn, (1f, hidden)));
+            return;
+        }
+        var a = Anim.C.CreateVector3KeyFrameAnimation();
         a.Duration = Anim.Sec(0.45);
-        a.InsertKeyFrame(0f, Vector2.Zero, Anim.Linear);
-        a.InsertKeyFrame(0.6f, new Vector2(1.18f), Anim.EaseOut);
-        a.InsertKeyFrame(1f, Vector2.One, Anim.EaseInOut);
-        a.DelayTime = TimeSpan.FromSeconds(delay);
+        a.InsertKeyFrame(0f, hidden, Anim.Linear);
+        a.InsertKeyFrame(0.6f, new Vector3(1.18f, 1.18f, 1), Anim.EaseOut);
+        a.InsertKeyFrame(1f, Vector3.One, Anim.EaseInOut);
+        a.DelayTime = TimeSpan.FromSeconds(_rng.Range(0f, 0.3f));
         a.DelayBehavior = AnimationDelayBehavior.SetInitialValueBeforeDelay;
-        shape.StartAnimation("Scale", a);
+        v.StartAnimation("Scale", a);
     }
 
     // ---------------------------------------------------------------- gusts
@@ -728,16 +865,17 @@ internal sealed class GrassField : IDisposable
 
     private void Cut(Blade b, ref int clippings)
     {
+        double now = Clock.Now;
         b.Cut = true;
         b.Serial++;
         float stubble = Math.Clamp(MathF.Max(_rng.Range(0.06f, 0.16f), 2.5f / b.Length), 0.05f, 0.45f);
-        b.Shape.StartAnimation("Scale.Y", Anim.Scalar(0.2, Anim.EaseOut, 1f, stubble));
+        b.Scale = Tween.Run(b.Scale.Value(now), stubble, now, 0.2, Ease.Out);
 
-        if (b.Flower is { Visible: true } f)
+        if (b.Flower is { } f && f.Scale.Value(now) > 0.01f)
         {
-            f.Head.StartAnimation("Scale", Anim.Vec2(0.15, Anim.EaseIn, (1f, Vector2.Zero)));
-            var head = new Vector2(b.X + f.Tip.X, _strip.GroundY - G + f.Tip.Y);
-            var color = Shapes.Solid(_brushes.Palette.Flowers[f.Color]);
+            f.Scale = Tween.Run(f.Scale.Value(now), 0f, now, 0.15, Ease.In);
+            var head = new Vector2(b.X + f.Head.X, _strip.GroundY - G + f.Head.Y);
+            var color = Shapes.Solid(_palette.Flowers[f.Color]);
             for (int k = 0; k < 5; k++)
             {
                 float size = f.Radius * 1.4f + 2f;
@@ -746,12 +884,14 @@ internal sealed class GrassField : IDisposable
                     _strip.GroundY - head.Y + 14f, _rng.Range(-400f, 400f), _rng.Range(1.0f, 1.6f));
             }
         }
+        Animate(b.Group);
 
         if (clippings < 10 && _rng.Chance(0.65f))
         {
             clippings++;
             s_slivers ??= new[] { Sliver(3.2f, 0.5f), Sliver(4.2f, -0.6f), Sliver(5f, 0.9f) };
-            var sliver = Shapes.Path(_rng.Pick(s_slivers), Shapes.Solid(_brushes.TipColor(b.Depth, b.Hue)));
+            var tip = GrassBrushes.Colors(_palette, b.Depth, b.Hue).Tip;
+            var sliver = Shapes.Path(_rng.Pick(s_slivers), Shapes.Solid(tip));
             float cutY = _strip.GroundY - b.Length * stubble;
             var start = new Vector2(b.X, cutY - b.Length * 0.25f);
             Fx.Toss(_strip.Fx, sliver, 12f, start, _rng.Range(-34f, 34f), _rng.Range(6f, 18f),
@@ -770,28 +910,28 @@ internal sealed class GrassField : IDisposable
     private void Regrow(List<(Blade Blade, int Serial)> cut)
     {
         if (_disposed) return;
+        double now = Clock.Now;
         foreach (var (b, serial) in cut)
         {
             if (b.Serial != serial || !b.Cut) continue;
             b.Cut = false;
             double delay = _rng.Range(0f, 4f), seconds = _rng.Range(2f, 4f);
-            var grow = Anim.Scalar(seconds, Anim.EaseInOut, 1f, 1f);
-            grow.DelayTime = TimeSpan.FromSeconds(delay);
-            b.Shape.StartAnimation("Scale.Y", grow);
-            if (b.Flower is { Visible: true } f) Pop(f.Head, delay + seconds * 0.9);
+            b.Scale = Tween.Run(b.Scale.Value(now), 1f, now + delay, seconds, Ease.InOut);
+            if (b.Flower is { Visible: true } f) f.Scale = Tween.Run(0f, 1f, now + delay + seconds * 0.9, 0.45, Ease.Pop);
+            Animate(b.Group);
         }
     }
 
     private void Boing(Mushroom m)
     {
-        var a = Anim.C.CreateVector2KeyFrameAnimation();
+        var a = Anim.C.CreateVector3KeyFrameAnimation();
         a.Duration = Anim.Sec(0.85);
-        a.InsertKeyFrame(0.12f, new Vector2(1.3f, 0.66f), Anim.EaseOut);
-        a.InsertKeyFrame(0.32f, new Vector2(0.84f, 1.2f), Anim.EaseInOut);
-        a.InsertKeyFrame(0.52f, new Vector2(1.1f, 0.93f), Anim.EaseInOut);
-        a.InsertKeyFrame(0.74f, new Vector2(0.97f, 1.04f), Anim.EaseInOut);
-        a.InsertKeyFrame(1f, Vector2.One, Anim.EaseInOut);
-        m.Shape.StartAnimation("Scale", a);
+        a.InsertKeyFrame(0.12f, new Vector3(1.3f, 0.66f, 1), Anim.EaseOut);
+        a.InsertKeyFrame(0.32f, new Vector3(0.84f, 1.2f, 1), Anim.EaseInOut);
+        a.InsertKeyFrame(0.52f, new Vector3(1.1f, 0.93f, 1), Anim.EaseInOut);
+        a.InsertKeyFrame(0.74f, new Vector3(0.97f, 1.04f, 1), Anim.EaseInOut);
+        a.InsertKeyFrame(1f, Vector3.One, Anim.EaseInOut);
+        m.Visual.StartAnimation("Scale", a);
 
         var spore = Shapes.Solid(0xFFF8E1, 220);
         var top = new Vector2(m.X, _strip.GroundY - m.Height);
@@ -810,34 +950,38 @@ internal sealed class GrassField : IDisposable
         if (_disposed) return;
         _disposed = true;
         _ambientToken?.Cancel();
+        _frameToken?.Cancel();
         _clock.Stopped -= OnClockStopped;
         foreach (var g in _active)
         {
             g.Props.StopAnimation("Th");
             g.Visual.StopAnimation("TransformMatrix");
         }
-        foreach (var b in _buckets) b.Swayer.StopAnimation("TransformMatrix");
-        // Close everything this field put in the strip's layers (shapes included), then the cached sources.
+        foreach (var b in _buckets) b.Visual.StopAnimation("TransformMatrix");
+        // Close everything this field put in the strip's layers, then the tiles behind them.
         var owned = new List<Visual>(_strip.BackGrass.Children);
         owned.AddRange(_strip.FrontGrass.Children);
         _strip.BackGrass.Children.RemoveAll();
         _strip.FrontGrass.Children.RemoveAll();
         foreach (var v in owned) Shapes.DisposeTree(v);
-        foreach (var b in _buckets)
+        foreach (var g in _groups)
         {
-            b.Brush?.Dispose();
-            b.Surface?.Dispose();
-            if (b.Source != null) Shapes.DisposeTree(b.Source);
+            g.Brush.Dispose();
+            g.Canvas.Dispose();
         }
-        _mushroomBrush?.Dispose();
-        _mushroomSurface?.Dispose();
-        if (_mushroomSource != null) Shapes.DisposeTree(_mushroomSource);
+        foreach (var m in _mushrooms)
+        {
+            m.Brush.Dispose();
+            m.Canvas.Dispose();
+            if (m.Cap != IntPtr.Zero) System.Runtime.InteropServices.Marshal.Release(m.Cap);
+        }
         _groups.Clear();
         _buckets.Clear();
         _bucketIndex.Clear();
         _blades.Clear();
         _mushrooms.Clear();
         _active.Clear();
+        _animating.Clear();
         _theta.Dispose();
         _matrix.Dispose();
         _sway.Dispose();

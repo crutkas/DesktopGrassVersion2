@@ -151,17 +151,25 @@ internal sealed unsafe class PathBuilder
     }
 
     /// <summary>Finishes the geometry and wraps it for composition.</summary>
-    public CompositionPath Build()
+    public CompositionPath Build() => GeometrySource.CreatePath(BuildD2D());
+
+    /// <summary>Finishes the geometry and returns the ID2D1PathGeometry (the caller owns the reference).</summary>
+    public IntPtr BuildD2D()
     {
         if (_sink == IntPtr.Zero) throw new InvalidOperationException("PathBuilder already built.");
         EndFigure(false);
         int hr = ((delegate* unmanaged<IntPtr, int>)Vt(_sink)[9])(_sink);
         Marshal.Release(_sink);
         _sink = IntPtr.Zero;
-        D2D.Check(hr);
+        if (hr < 0)
+        {
+            Marshal.Release(_geometry);
+            _geometry = IntPtr.Zero;
+            D2D.Check(hr);
+        }
         IntPtr geometry = _geometry;
         _geometry = IntPtr.Zero;
-        return GeometrySource.CreatePath(geometry);
+        return geometry;
     }
 
     public CompositionPathGeometry BuildGeometry(Compositor compositor) => compositor.CreatePathGeometry(Build());

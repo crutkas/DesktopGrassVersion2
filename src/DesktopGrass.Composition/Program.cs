@@ -28,6 +28,7 @@ internal static class Program
         var queueController = CompositionInterop.CreateDispatcherQueueForCurrentThread();
         var compositor = new Compositor();
         Anim.Init(compositor);
+        Raster.Init(compositor);
         Log.Write($"compositor ready (pid {Environment.ProcessId})");
 
         using (var app = new GrassApp(compositor, options, dataDir))

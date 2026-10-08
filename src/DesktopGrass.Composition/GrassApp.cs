@@ -58,8 +58,7 @@ internal sealed class GrassApp : IDisposable
         _settings = options.NoSettings ? new Settings() : Settings.Load(_settingsPath);
         _seed = options.Seed ?? (ulong)DateTime.UtcNow.Ticks;
         _rng = new Rng(_seed ^ 0x5DEECE66DUL);
-        _grassConfig = new GrassConfig(options.SegmentWidth ?? 30f, options.FrontSegmentWidth ?? 48f, options.Density ?? 1f, options.BucketWidth ?? 140f,
-            Cache: !options.NoCache);
+        _grassConfig = new GrassConfig(options.SegmentWidth ?? 30f, options.FrontSegmentWidth ?? 48f, options.Density ?? 1f, options.BucketWidth ?? 140f);
         _wind = new Wind(compositor, _scheduler);
         _gusts = new GustClock(compositor, _scheduler);
     }
@@ -72,7 +71,7 @@ internal sealed class GrassApp : IDisposable
         Motion = ParseMotion(_options.Motion ?? _settings.Motion) ?? DefaultMotion();
         CrittersOn = _settings.Critters && !_options.NoCritters;
         SkyOn = _settings.Sky && !_options.NoSky;
-        _brushes = new GrassBrushes(_compositor, Palette, GrassField.G);
+        _brushes = new GrassBrushes(_compositor, Palette);
 
         BuildStrips();
         ApplyMotion(animate: false);
@@ -90,6 +89,7 @@ internal sealed class GrassApp : IDisposable
             ApplyMotion(animate: true);
         };
         StripWindow.DpiChanged += OnStripDpiChanged;
+        Raster.DeviceReplaced += OnRasterDeviceReplaced;
 
         if (!_options.NoHook)
         {
@@ -120,7 +120,7 @@ internal sealed class GrassApp : IDisposable
             var strip = new Strip(_compositor, monitors[i]);
             _strips.Add(strip);
             Log.Write($"strip {i}: monitor {monitors[i].Bounds} work {monitors[i].Work} dpi {monitors[i].Dpi} -> {strip.Width:F0}x{strip.Height:F0} DIP");
-            var field = new GrassField(strip, _wind, _gusts, _brushes!, _scheduler, new Rng(_seed + (ulong)i * 0x9E3779B9UL), _grassConfig);
+            var field = new GrassField(strip, _wind, _gusts, Palette, _scheduler, new Rng(_seed + (ulong)i * 0x9E3779B9UL), _grassConfig, _brushes!.Turf);
             _fields.Add(field);
             if (_options.NoGrass)
             {
@@ -166,6 +166,8 @@ internal sealed class GrassApp : IDisposable
     }
 
     private void OnStripDpiChanged() => ScheduleRebuild("strip dpi change");
+
+    private void OnRasterDeviceReplaced() => ScheduleRebuild("graphics device replaced");
 
     private void UpdateVisibility()
     {
@@ -437,6 +439,7 @@ internal sealed class GrassApp : IDisposable
     public void Dispose()
     {
         StripWindow.DpiChanged -= OnStripDpiChanged;
+        Raster.DeviceReplaced -= OnRasterDeviceReplaced;
         if (_hook != null) Log.Write($"input: {_hook.MoveSeq} hook moves, {_statWakes} wakes, {_statMoves} processed, {_statGusts} gusts, {_statClicks} clicks");
         _hook?.Dispose();
         _tray?.Dispose();

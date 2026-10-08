@@ -129,55 +129,21 @@ internal sealed class GustClock
     }
 }
 
-/// <summary>Brushes shared by every strip so a scene change is just a handful of color animations.</summary>
+/// <summary>
+/// Grass colors for a palette (the tiles are rasterized with these), plus the one shared composition brush:
+/// the turf band, whose colors crossfade on a scene change.
+/// </summary>
 internal sealed class GrassBrushes
 {
-    public const int Depths = 3; // back, mid, front
-    public const int Hues = 6;
-    public const float GradientSpan = 34f;
-
-    public readonly CompositionLinearGradientBrush[,] Blade = new CompositionLinearGradientBrush[Depths, Hues];
-    private readonly CompositionColorGradientStop[,] _baseStops = new CompositionColorGradientStop[Depths, Hues];
-    private readonly CompositionColorGradientStop[,] _tipStops = new CompositionColorGradientStop[Depths, Hues];
-    public readonly CompositionColorBrush[] Petal = new CompositionColorBrush[Hues];
-    public readonly CompositionColorBrush[] Cap = new CompositionColorBrush[Hues];
-    public readonly CompositionColorBrush FlowerCenter;
-    public readonly CompositionColorBrush Stem;
     /// <summary>Soft band along the ground line that closes gaps between blade bases.</summary>
     public readonly CompositionLinearGradientBrush Turf;
     private readonly CompositionColorGradientStop _turfTop, _turfBottom;
 
     public Palette Palette { get; private set; }
 
-    public GrassBrushes(Compositor c, Palette palette, float groundY)
+    public GrassBrushes(Compositor c, Palette palette)
     {
         Palette = palette;
-        for (int d = 0; d < Depths; d++)
-        {
-            for (int h = 0; h < Hues; h++)
-            {
-                var (baseColor, tipColor) = Colors(palette, d, h);
-                var brush = c.CreateLinearGradientBrush();
-                brush.MappingMode = CompositionMappingMode.Absolute;
-                brush.StartPoint = new System.Numerics.Vector2(0, groundY);
-                brush.EndPoint = new System.Numerics.Vector2(0, groundY - GradientSpan);
-                var s0 = c.CreateColorGradientStop(0f, baseColor);
-                var s1 = c.CreateColorGradientStop(1f, tipColor);
-                brush.ColorStops.Add(s0);
-                brush.ColorStops.Add(s1);
-                Blade[d, h] = brush;
-                _baseStops[d, h] = s0;
-                _tipStops[d, h] = s1;
-            }
-        }
-        for (int i = 0; i < Hues; i++)
-        {
-            Petal[i] = c.CreateColorBrush(palette.Flowers[i]);
-            Cap[i] = c.CreateColorBrush(palette.Caps[i]);
-        }
-        FlowerCenter = c.CreateColorBrush(palette.FlowerCenter);
-        Stem = c.CreateColorBrush(palette.Stem);
-
         var turf = TurfColor(palette);
         Turf = c.CreateLinearGradientBrush();
         Turf.MappingMode = CompositionMappingMode.Relative;
@@ -191,6 +157,7 @@ internal sealed class GrassBrushes
 
     private static Color TurfColor(Palette p) => Colors(p, 1, 2).Base;
 
+    /// <summary>Base (ground) and tip colors of a blade of the given depth (0 back .. 2 front) and hue.</summary>
     public static (Color Base, Color Tip) Colors(Palette p, int depth, int hue)
     {
         Color tip = p.Blades[hue];
@@ -207,45 +174,22 @@ internal sealed class GrassBrushes
         return (Anim.Darken(tip, shade), tip);
     }
 
-    public Color TipColor(int depth, int hue) => Colors(Palette, depth, hue).Tip;
-
     public void SetPalette(Palette palette, bool animate)
     {
         Palette = palette;
-        double seconds = 1.6;
-        for (int d = 0; d < Depths; d++)
-        {
-            for (int h = 0; h < Hues; h++)
-            {
-                var (b, t) = Colors(palette, d, h);
-                SetColor(_baseStops[d, h], b, animate, seconds);
-                SetColor(_tipStops[d, h], t, animate, seconds);
-            }
-        }
-        for (int i = 0; i < Hues; i++)
-        {
-            SetColor(Petal[i], palette.Flowers[i], animate, seconds);
-            SetColor(Cap[i], palette.Caps[i], animate, seconds);
-        }
-        SetColor(FlowerCenter, palette.FlowerCenter, animate, seconds);
-        SetColor(Stem, palette.Stem, animate, seconds);
         var turf = TurfColor(palette);
-        SetColor(_turfTop, Anim.WithAlpha(turf, 0), animate, seconds);
-        SetColor(_turfBottom, turf, animate, seconds);
+        SetColor(_turfTop, Anim.WithAlpha(turf, 0), animate);
+        SetColor(_turfBottom, turf, animate);
     }
 
-    private static void SetColor(CompositionObject target, Color color, bool animate, double seconds)
+    private static void SetColor(CompositionColorGradientStop stop, Color color, bool animate)
     {
         if (animate)
         {
-            target.StartAnimation("Color", Anim.Color(seconds, color));
+            stop.StartAnimation("Color", Anim.Color(1.6, color));
             return;
         }
-        target.StopAnimation("Color");
-        switch (target)
-        {
-            case CompositionColorGradientStop stop: stop.Color = color; break;
-            case CompositionColorBrush brush: brush.Color = color; break;
-        }
+        stop.StopAnimation("Color");
+        stop.Color = color;
     }
 }
