@@ -49,7 +49,11 @@ internal sealed class Tray : IDisposable
         motion.DropDownItems.Add(new ToolStripMenuItem("Calm (only reacts to you)", null, (_, _) => _app.SetMotion(MotionMode.Calm)) { Checked = _app.Motion == MotionMode.Calm });
         _menu.Items.Add(motion);
 
+        _menu.Items.Add(new ToolStripMenuItem("Critters", null, (_, _) => _app.SetCritters(!_app.CrittersOn)) { Checked = _app.CrittersOn });
+        _menu.Items.Add(new ToolStripMenuItem("Butterflies, fireflies and birds", null, (_, _) => _app.SetSky(!_app.SkyOn)) { Checked = _app.SkyOn });
+        _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Send a gust", null, (_, _) => _app.GustNow()));
+        _menu.Items.Add(new ToolStripMenuItem("Send birds", null, (_, _) => _app.SendBirds()));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Pause", null, (_, _) => _app.SetPaused(!_app.Paused)) { Checked = _app.Paused });
         _menu.Items.Add(new ToolStripMenuItem("Quit", null, (_, _) => _app.Quit()));

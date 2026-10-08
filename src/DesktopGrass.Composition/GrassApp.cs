@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Numerics;
 using System.Windows.Forms;
 using DesktopGrass.Composition.Interop;
 using Windows.UI.Composition;
@@ -20,6 +21,7 @@ internal sealed class GrassApp : IDisposable
     private readonly Scheduler _scheduler = new();
     private readonly List<Strip> _strips = new();
     private readonly List<GrassField> _fields = new();
+    private readonly List<StripLife> _lives = new();
     private readonly ulong _seed;
     private readonly Rng _rng;
     private readonly GrassConfig _grassConfig;
@@ -43,6 +45,8 @@ internal sealed class GrassApp : IDisposable
     public Palette Palette { get; private set; } = Palette.Meadow;
     public MotionMode Motion { get; private set; }
     public bool Paused { get; private set; }
+    public bool CrittersOn { get; private set; } = true;
+    public bool SkyOn { get; private set; } = true;
 
     private MotionMode EffectiveMotion => Paused || _locked || _batterySaver ? MotionMode.Calm : Motion;
 
@@ -54,7 +58,7 @@ internal sealed class GrassApp : IDisposable
         _settings = options.NoSettings ? new Settings() : Settings.Load(_settingsPath);
         _seed = options.Seed ?? (ulong)DateTime.UtcNow.Ticks;
         _rng = new Rng(_seed ^ 0x5DEECE66DUL);
-        _grassConfig = new GrassConfig(options.SegmentWidth ?? 30f, options.FrontSegmentWidth ?? 48f, options.Density ?? 1f);
+        _grassConfig = new GrassConfig(options.SegmentWidth ?? 30f, options.FrontSegmentWidth ?? 48f, options.Density ?? 1f, options.BucketWidth ?? 140f);
         _wind = new Wind(compositor, _scheduler);
         _gusts = new GustClock(compositor, _scheduler);
     }
@@ -65,6 +69,8 @@ internal sealed class GrassApp : IDisposable
         if (!Palette.TryParse(scene, out var kind)) Log.Write($"unknown scene '{scene}', using Meadow");
         Palette = Palette.From(kind);
         Motion = ParseMotion(_options.Motion ?? _settings.Motion) ?? DefaultMotion();
+        CrittersOn = _settings.Critters && !_options.NoCritters;
+        SkyOn = _settings.Sky && !_options.NoSky;
         _brushes = new GrassBrushes(_compositor, Palette, GrassField.G);
 
         BuildStrips();
@@ -92,6 +98,7 @@ internal sealed class GrassApp : IDisposable
         _tray = new Tray(this);
 
         if (_options.Demo) RunDemo();
+        if (_options.BirdsNow) _scheduler.After(0.5, SendBirds);
         ScheduleSnapshots();
         if (_options.ExitAfter > 0) _scheduler.After(_options.ExitAfter, Quit);
         Log.Write($"started: scene {Palette.Name}, motion {Motion}, seed {_seed}");
@@ -112,16 +119,34 @@ internal sealed class GrassApp : IDisposable
             var strip = new Strip(_compositor, monitors[i]);
             _strips.Add(strip);
             Log.Write($"strip {i}: monitor {monitors[i].Bounds} work {monitors[i].Work} dpi {monitors[i].Dpi} -> {strip.Width:F0}x{strip.Height:F0} DIP");
-            _fields.Add(new GrassField(strip, _wind, _gusts, _brushes!, _scheduler, new Rng(_seed + (ulong)i * 0x9E3779B9UL), _grassConfig));
+            var field = new GrassField(strip, _wind, _gusts, _brushes!, _scheduler, new Rng(_seed + (ulong)i * 0x9E3779B9UL), _grassConfig);
+            _fields.Add(field);
+            if (_options.NoGrass)
+            {
+                strip.BackGrass.IsVisible = false;
+                strip.FrontGrass.IsVisible = false;
+            }
+            field.SetAmbient(_motionApplied && _wind.Mode == MotionMode.Full && !_options.NoSway, 0);
+            var life = new StripLife(strip, field, _scheduler, new Rng((_seed ^ 0xC3A5C85C97CB3127UL) + (ulong)i * 0x9E3779B9UL));
+            _lives.Add(life);
+            life.Apply(Palette.Kind, EffectiveMotion, CrittersOn, SkyOn);
             SchedulePuff(i, _generation);
         }
         UpdateVisibility();
+    }
+
+    private void ApplyLife()
+    {
+        var mode = EffectiveMotion;
+        foreach (var life in _lives) life.Apply(Palette.Kind, mode, CrittersOn, SkyOn);
     }
 
     private void TearDownStrips()
     {
         _generation++;
         _gusts.Stop();
+        foreach (var life in _lives) life.Dispose();
+        _lives.Clear();
         foreach (var f in _fields) f.Dispose();
         _fields.Clear();
         foreach (var s in _strips) s.Dispose();
@@ -178,6 +203,8 @@ internal sealed class GrassApp : IDisposable
         if (_motionApplied && _wind.Mode == mode) return;
         _motionApplied = true;
         _wind.SetMode(mode, animate);
+        foreach (var f in _fields) f.SetAmbient(mode == MotionMode.Full && !_options.NoSway, animate ? 1.4 : 0.05);
+        ApplyLife();
         Log.Write($"motion -> {mode}");
     }
 
@@ -186,7 +213,7 @@ internal sealed class GrassApp : IDisposable
         _scheduler.After(_rng.Range(5f, 15f), () =>
         {
             if (generation != _generation) return;
-            if (EffectiveMotion == MotionMode.Full && _strips[index].Window.Visible) _fields[index].Puff(_rng);
+            if (EffectiveMotion == MotionMode.Full && !_options.NoSway && _strips[index].Window.Visible) _fields[index].Puff(_rng);
             SchedulePuff(index, generation);
         });
     }
@@ -230,6 +257,7 @@ internal sealed class GrassApp : IDisposable
     {
         if (Paused || (dxPx == 0 && dyPx == 0)) return;
         int i = StripAt(x, y);
+        for (int j = 0; j < _lives.Count; j++) _lives[j].Hover(j == i ? _strips[j].ToLocal(x, y) : null);
         if (i < 0) return;
         var s = _strips[i];
         var p = s.ToLocal(x, y);
@@ -244,6 +272,7 @@ internal sealed class GrassApp : IDisposable
         int i = StripAt(x, y);
         if (i < 0) return;
         var p = _strips[i].ToLocal(x, y);
+        if (_lives[i].Click(p)) return;
         _fields[i].Click(p.X, p.Y);
     }
 
@@ -265,9 +294,38 @@ internal sealed class GrassApp : IDisposable
         Palette = Palette.From(kind);
         _brushes!.SetPalette(Palette, animate: true);
         foreach (var f in _fields) f.ApplyPalette(Palette, animate: true);
+        ApplyLife();
         _settings.Scene = Palette.Name;
         SaveSettings();
         Log.Write($"scene -> {Palette.Name}");
+    }
+
+    public void SetCritters(bool on)
+    {
+        if (CrittersOn == on) return;
+        CrittersOn = on;
+        _settings.Critters = on;
+        SaveSettings();
+        ApplyLife();
+        Log.Write($"critters -> {(on ? "on" : "off")}");
+    }
+
+    public void SetSky(bool on)
+    {
+        if (SkyOn == on) return;
+        SkyOn = on;
+        _settings.Sky = on;
+        SaveSettings();
+        ApplyLife();
+        Log.Write($"sky -> {(on ? "on" : "off")}");
+    }
+
+    public void SendBirds()
+    {
+        for (int i = 0; i < _lives.Count; i++)
+        {
+            if (_strips[i].Window.Visible) _lives[i].SendBirds();
+        }
     }
 
     public void SetMotion(MotionMode mode)
@@ -322,6 +380,30 @@ internal sealed class GrassApp : IDisposable
         _scheduler.After(2.4, () => Log.Write($"demo cut hit: {field.Click(x1 + 100f, strip.GroundY - 8f)}"));
         if (field.TryFindMushroom(x1 + 200f, out float mx))
             _scheduler.After(2.6, () => Log.Write($"demo boing at {mx:F0} hit: {field.Click(mx, strip.GroundY - 3f)}"));
+
+        // Poke every critter: pat the cat, startle the rest.
+        _scheduler.After(2.9, () =>
+        {
+            var herd = _lives.Count > 0 ? _lives[0].Herd : null;
+            if (herd == null) return;
+            foreach (var c in herd.Critters)
+            {
+                bool pat = c is Cat;
+                var p = new Vector2(pat ? c.X : c.X + 30f, strip.GroundY - (pat ? c.BodyHeight * 0.5f : 6f));
+                Log.Write($"demo {(pat ? "pat" : "poke near")} {c.Name} the {c.Species}: direct hit {herd.Click(p)}");
+            }
+        });
+        // Hover the first sheep so its name tag shows.
+        _scheduler.After(3.0, () =>
+        {
+            var herd = _lives.Count > 0 ? _lives[0].Herd : null;
+            foreach (var c in herd?.Critters ?? Array.Empty<Critter>())
+            {
+                if (c is not Sheep) continue;
+                herd!.Hover(new Vector2(c.X, strip.GroundY - 12f));
+                break;
+            }
+        });
 
         // Exercise every tray command once.
         _scheduler.After(3.6, GustNow);

@@ -25,6 +25,9 @@ internal sealed class Options
     public float? SegmentWidth;
     public float? FrontSegmentWidth;
     public float? Density;
+    public float? BucketWidth;
+    public bool NoSway;
+    public bool NoGrass;
 
     public static Options Parse(string[] args)
     {
@@ -56,6 +59,9 @@ internal sealed class Options
                 case "--seg": o.SegmentWidth = NextFloat(); break;
                 case "--front-seg": o.FrontSegmentWidth = NextFloat(); break;
                 case "--density": o.Density = NextFloat(); break;
+                case "--bucket": o.BucketWidth = NextFloat(); break;
+                case "--no-sway": o.NoSway = true; break;
+                case "--no-grass": o.NoGrass = true; break;
             }
         }
         return o;

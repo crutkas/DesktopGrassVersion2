@@ -30,7 +30,7 @@ internal static class Fx
         if (spinDegrees != 0) v.StartAnimation("RotationAngleInDegrees", Anim.Scalar(seconds, Anim.Linear, 1f, spinDegrees));
         v.StartAnimation("Opacity", Anim.Scalar(seconds, Anim.Linear, 0.7f, 1f, 1f, 0f));
         batch.End();
-        batch.Completed += (_, _) => Remove(layer, v);
+        batch.Completed += (_, _) => Remove(v);
     }
 
     /// <summary>Eased drift by <paramref name="delta"/> that fades in, holds and fades out (spores, Zzz, hearts, sparkles).</summary>
@@ -62,7 +62,7 @@ internal static class Fx
             v.StartAnimation("RotationAngleInDegrees", spin);
         }
         batch.End();
-        batch.Completed += (_, _) => Remove(layer, v);
+        batch.Completed += (_, _) => Remove(v);
     }
 
     private static ShapeVisual Spawn(ContainerVisual layer, CompositionShape shape, float size, Vector2 center)
@@ -77,13 +77,12 @@ internal static class Fx
         return v;
     }
 
-    private static void Remove(ContainerVisual layer, Visual v)
+    private static void Remove(Visual v)
     {
         Live--;
         try
         {
-            layer.Children.Remove(v);
-            v.Dispose();
+            Shapes.Discard(v);
         }
         catch (Exception)
         {

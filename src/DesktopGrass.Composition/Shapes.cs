@@ -29,6 +29,46 @@ internal static class Shapes
 
     public static void ClearCache() => s_brushes.Clear();
 
+    /// <summary>Detaches <paramref name="visual"/> from its parent and closes its whole subtree.</summary>
+    public static void Discard(Visual visual)
+    {
+        visual.Parent?.Children.Remove(visual);
+        DisposeTree(visual);
+    }
+
+    /// <summary>
+    /// Closes a visual subtree including every shape inside its ShapeVisuals. Disposing a visual closes its
+    /// child visuals but not their shapes, and a shape's animations (even infinite loops) keep running in DWM
+    /// until the shape itself is closed. Brushes are shared, so they are left alone.
+    /// </summary>
+    public static void DisposeTree(Visual visual)
+    {
+        if (visual is ShapeVisual shapeVisual)
+        {
+            var shapes = new List<CompositionShape>(shapeVisual.Shapes);
+            shapeVisual.Shapes.Clear();
+            foreach (var s in shapes) DisposeShape(s);
+        }
+        if (visual is ContainerVisual container)
+        {
+            var children = new List<Visual>(container.Children);
+            container.Children.RemoveAll();
+            foreach (var child in children) DisposeTree(child);
+        }
+        visual.Dispose();
+    }
+
+    private static void DisposeShape(CompositionShape shape)
+    {
+        if (shape is CompositionContainerShape container)
+        {
+            var shapes = new List<CompositionShape>(container.Shapes);
+            container.Shapes.Clear();
+            foreach (var s in shapes) DisposeShape(s);
+        }
+        shape.Dispose();
+    }
+
     public static ShapeVisual Visual(float width, float height, Vector2 offset = default)
     {
         var v = C.CreateShapeVisual();

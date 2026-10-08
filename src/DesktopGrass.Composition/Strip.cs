@@ -98,8 +98,8 @@ internal sealed class Strip : IDisposable
     public void Dispose()
     {
         try { Target.Root = null; } catch { }
-        Root.Children.RemoveAll();
-        Root.Dispose();
+        // Closes the layers and anything still in them (e.g. particles in flight), shapes included.
+        try { Shapes.DisposeTree(Root); } catch { }
         Target.Dispose();
         Window.Dispose();
     }
