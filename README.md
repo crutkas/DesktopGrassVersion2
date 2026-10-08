@@ -69,53 +69,56 @@ flowchart LR
 
 ## What the POC taught us
 
-Measured on the dev box (ARM64, three monitors: 3270x2180 at 125% plus two 3840x2160 at 100%), cursor still,
-20–30 s per case with `Get-Counter`. CPU is percent of one core; DWM's idle baseline drifted between 21% and 26%.
+Measured on the dev box (ARM64; three monitors: 3270x2180 at 125% plus two 3840x2160 at 100%), cursor still,
+20 s per case with `Get-Counter`, cases run back to back. CPU is percent of one core. Absolute numbers drift a
+lot between sessions (one evening the original measured 24% and idle DWM 25%), so compare within a set.
 
-| Case | App CPU | DWM CPU | DWM GPU 3D | App private MB |
+| Case (same session) | App CPU | DWM CPU | DWM GPU 3D | App private MB |
 | --- | ---: | ---: | ---: | ---: |
-| Nothing running | – | 21–26% | 1–2% | – |
-| Original DesktopGrass 0.1.0 (D2D, 24 fps) | 24% | 27% | 1.7% | 25 |
-| v1: vector grass, an expression per grass group, Full | 2.3% | ~100% | 8.7% | 41 |
-| v1, Calm (nothing visibly moving) | 0.5% | 89% | 4.5% | 29 |
-| v2: sway per bucket, springs detached at rest, Full | 4.6% | ~100% | 10.4% | 39 |
-| v2, Calm | 1.7% | 27% | 1.2% | 28 |
-| v2, grass held still, only butterflies and fireflies moving | 0.6% | 91% | 6.9% | 27 |
-| v2, the same butterflies and fireflies with the grass hidden | 0.4% | 29% | 8.7% | 27 |
-| **Current build: grass cached in visual surfaces** | | | | |
+| Nothing running | – | 10–16% | 1–3% | – |
+| Original DesktopGrass 0.1.0 (D2D, 24 fps) | 10.4% | 11.9% | 1.4% | 19 |
+| POC, Full motion, cached grass (default) | 1.6% | 29% | 5.1% | 21 |
+| POC, Full motion, live vector grass (`--no-cache`) | 1.0% | 56% | 11.4% | 18 |
+| POC, Calm | 0% | 21% | 3.5% | 16 |
+| POC, grass held still with butterflies and fireflies moving | 1.1% | 20% | 4.7% | 18 |
 
-The current build's numbers are still to be taken (it needs a run with the displays awake).
+In Full motion the POC costs about what the original does in total (≈16% vs ≈11% of a core here), but the work
+has moved from the app into DWM, and it animates at the display's refresh rate instead of 24 fps. Calm mode,
+which still reacts to the mouse with full-rate springs, is close to free.
 
 Lessons:
 
-1. **The app gets 5–10x cheaper, but the work moves into DWM.** Composition is not free; it is someone else's
-   CPU. The original pays ~24% of a core in its own process and leaves DWM alone.
-2. **Attached expressions cost DWM every frame, even when nothing changes.** ~2,500 idle expressions kept a DWM
-   core busy in Calm. Detaching them at rest brought Calm back to baseline: the grass costs nothing until you
-   touch it.
+1. **The app gets ~10x cheaper, but the work moves into DWM.** Composition is not free; it is someone else's
+   CPU.
+2. **Attached expressions cost DWM every frame, even when nothing changes.** An earlier build with an
+   expression per grass group (~2,500) kept a DWM core busy even in Calm. Detaching them at rest brought Calm
+   back to baseline: the grass costs nothing until you touch it.
 3. **DWM does not cache `ShapeVisual` vector content.** Anything moving nearby (even a few butterflies) makes
-   DWM re-rasterize every vector shape in the dirty region, every frame. With ~6,000 blades on three monitors
-   that pegged a DWM core however few expressions there were (4x fewer groups: no change; the same butterflies
-   with the grass hidden: +4%). So the current build renders each bucket once into a
-   `CompositionVisualSurface`: ambient sway just shears textures, and a bucket re-renders only while its own
-   blades change (gusts, cuts). In snapshots, pre-scaling the cached content made no visible difference; the
-   cached blades lose a little anti-aliasing at the thinnest tips.
-4. **Closing a visual doesn't stop the animations on its shapes.** Disposing a visual closes its child visuals
+   DWM re-rasterize every vector shape in the dirty region, every frame: with ~6,000 blades that pegged a DWM
+   core regardless of how few expressions there were. Rendering each ~140 DIP bucket into a
+   `CompositionVisualSurface` (shown on a `SpriteVisual`, sway applied as a shear of the texture) cut DWM's
+   added load in Full motion from +42% to +15% of a core.
+4. **…but visual surfaces lose anti-aliasing.** DWM rasterizes visual-surface content at screen resolution
+   with no anti-aliasing, and laying the source out at a higher scale made no difference, so blade edges
+   stair-step and the thinnest tips break up. Pixel-snapping the sprites keeps it sharp, not smooth. The fix
+   is to rasterize static art ourselves with Direct2D into `CompositionDrawingSurface`s and keep composition
+   for motion.
+5. **Closing a visual doesn't stop the animations on its shapes.** Disposing a visual closes its child visuals
    but not the `CompositionShape`s inside them, so infinite loops (wing flaps, gaits, blinks) kept running in
    DWM after the bird or critter was gone. Retired content is now closed shape by shape (`Shapes.Discard`).
-5. **There's no frame-rate knob.** Composition animations run at the display refresh rate, so "how much moves"
-   matters more than "how fast". Calm mode is the real power saver.
-
+6. **There's no frame-rate knob.** Composition animations run at the display refresh rate, so "how much
+   moves" matters more than "how fast". Calm mode is the real power saver.
 ## Flags
 
 `--scene <name>`, `--motion full|calm`, `--log` (writes `log.txt` next to the settings), `--demo` (scripted
 gust, cut, boing, critter pokes and tray commands), `--birds-now`, `--no-hook`, `--no-settings`, `--seed <n>`,
 `--exit-after <s>`, `--snapshot <png> --snapshot-after <s,s,...> --snapshot-strip <i>`.
-Measurement knobs: `--no-critters`, `--no-sky`, `--no-sway` (no ambient sway or puffs), `--no-grass`,
+Measurement knobs: `--no-cache` (live vector grass), `--no-critters`, `--no-sky`, `--no-sway` (no ambient sway or puffs), `--no-grass`,
 `--bucket <dip>`, `--seg <dip>`, `--front-seg <dip>`, `--density <x>`.
 
 ## Next steps
 
-- Re-measure Full motion with cached grass, and on a single-monitor laptop.
+- Rasterize grass, mushrooms and props with Direct2D into composition drawing surfaces (anti-aliased, still cheap).
+- Measure on a single-monitor laptop, on battery.
 - Try a C++/WinRT or NativeAOT build to shrink the managed working set.
 - Cache critters and props the same way when they are at rest.

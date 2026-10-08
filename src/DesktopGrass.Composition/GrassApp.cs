@@ -58,7 +58,8 @@ internal sealed class GrassApp : IDisposable
         _settings = options.NoSettings ? new Settings() : Settings.Load(_settingsPath);
         _seed = options.Seed ?? (ulong)DateTime.UtcNow.Ticks;
         _rng = new Rng(_seed ^ 0x5DEECE66DUL);
-        _grassConfig = new GrassConfig(options.SegmentWidth ?? 30f, options.FrontSegmentWidth ?? 48f, options.Density ?? 1f, options.BucketWidth ?? 140f);
+        _grassConfig = new GrassConfig(options.SegmentWidth ?? 30f, options.FrontSegmentWidth ?? 48f, options.Density ?? 1f, options.BucketWidth ?? 140f,
+            Cache: !options.NoCache);
         _wind = new Wind(compositor, _scheduler);
         _gusts = new GustClock(compositor, _scheduler);
     }

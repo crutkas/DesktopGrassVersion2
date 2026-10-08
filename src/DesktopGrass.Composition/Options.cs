@@ -28,6 +28,7 @@ internal sealed class Options
     public float? BucketWidth;
     public bool NoSway;
     public bool NoGrass;
+    public bool NoCache;
 
     public static Options Parse(string[] args)
     {
@@ -62,6 +63,7 @@ internal sealed class Options
                 case "--bucket": o.BucketWidth = NextFloat(); break;
                 case "--no-sway": o.NoSway = true; break;
                 case "--no-grass": o.NoGrass = true; break;
+                case "--no-cache": o.NoCache = true; break;
             }
         }
         return o;

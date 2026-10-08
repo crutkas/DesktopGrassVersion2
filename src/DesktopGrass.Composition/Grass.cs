@@ -1,12 +1,14 @@
 // Grass.cs - one strip's grass: blades batched into swaying groups, flowers, mushrooms, gusts and cuts.
 //
 // Every blade is a filled, tapered CompositionSpriteShape with a shared gradient brush. Blades are batched
-// into ShapeVisual "groups" (one per ~30 DIP segment per depth layer). Motion is a shear about the ground
-// line, which doesn't depend on x, so it composes cleanly at two levels:
-//   - ambient sway: one expression per "bucket" container (~140 DIP of one layer), driven by the shared
-//     Wind phases. Attached only in Full motion.
+// into ShapeVisual "groups" (one per ~30 DIP segment per depth layer), and groups into ~140 DIP "buckets".
+// Each bucket is rendered once into a CompositionVisualSurface and shown on a SpriteVisual, because DWM
+// re-rasterizes live vector shapes in every dirty region. Motion is a shear about the ground line, which
+// doesn't depend on x, so it composes cleanly at two levels:
+//   - ambient sway: one expression per bucket sprite, driven by the shared Wind phases. Attached only in
+//     Full motion; it just shears the cached texture.
 //   - gusts: a damped spring per group (v/p/t on its property set, timed by GustClock), attached only
-//     while that group is springing.
+//     while that group is springing (its bucket re-renders meanwhile).
 // So at rest in Calm mode nothing is animating at all, and DWM can idle.
 using System;
 using System.Collections.Generic;
@@ -17,7 +19,8 @@ using Windows.UI.Composition;
 
 namespace DesktopGrass.Composition;
 
-internal sealed record GrassConfig(float SegmentWidth = 30f, float FrontSegmentWidth = 48f, float Density = 1f, float BucketWidth = 140f);
+internal sealed record GrassConfig(float SegmentWidth = 30f, float FrontSegmentWidth = 48f, float Density = 1f, float BucketWidth = 140f,
+    bool Cache = true);
 
 internal sealed class GrassField : IDisposable
 {
@@ -57,8 +60,10 @@ internal sealed class GrassField : IDisposable
 
     private sealed class Bucket
     {
-        /// <summary>Holds the bucket's groups; never in the live tree, only rendered into Surface.</summary>
-        public required ContainerVisual Source;
+        /// <summary>The bucket's groups, in strip DIPs.</summary>
+        public required ContainerVisual Content;
+        /// <summary>When cached: the unparented root a VisualSurface renders (Content sits inside, scaled to device pixels).</summary>
+        public ContainerVisual? Source;
         public float CenterX;
         public int Layer;
         public float P1, P2;
@@ -66,6 +71,10 @@ internal sealed class GrassField : IDisposable
         public SpriteVisual? Sprite;
         public CompositionVisualSurface? Surface;
         public CompositionSurfaceBrush? Brush;
+        /// <summary>Ground line in the swaying visual's local DIPs.</summary>
+        public float Pivot;
+        /// <summary>What ambient sway shears: the cached sprite, or the live content when caching is off.</summary>
+        public Visual Swayer => Sprite != null ? Sprite : Content;
     }
 
     private sealed class Group
@@ -117,10 +126,10 @@ internal sealed class GrassField : IDisposable
     private readonly Dictionary<long, Bucket> _bucketIndex = new();
     private readonly ContainerVisual[] _layers = new ContainerVisual[4];
     private readonly ShapeVisual _mushroomVisual;
-    private readonly ContainerVisual _mushroomSource;
-    private readonly SpriteVisual _mushroomSprite;
-    private readonly CompositionVisualSurface _mushroomSurface;
-    private readonly CompositionSurfaceBrush _mushroomBrush;
+    private readonly ContainerVisual? _mushroomSource;
+    private readonly SpriteVisual? _mushroomSprite;
+    private readonly CompositionVisualSurface? _mushroomSurface;
+    private readonly CompositionSurfaceBrush? _mushroomBrush;
     private readonly SpriteVisual _turf;
     private readonly ExpressionAnimation _theta, _matrix, _sway;
     private TimerToken? _ambientToken;
@@ -153,7 +162,6 @@ internal sealed class GrassField : IDisposable
         _sway = c.CreateExpressionAnimation(BucketExpression);
         _sway.SetReferenceParameter("W", wind.Set);
         _sway.SetScalarParameter("M", MaxTheta);
-        _sway.SetScalarParameter("H", G + 2f); // the ground line inside a bucket sprite
 
         _turf = c.CreateSpriteVisual();
         _turf.Size = new Vector2(strip.Width, 5);
@@ -164,16 +172,24 @@ internal sealed class GrassField : IDisposable
         var mushroomSlot = c.CreateContainerVisual();
         strip.BackGrass.Children.InsertAtTop(mushroomSlot);
         _mushroomVisual = Shapes.Visual(strip.Width, G + 1, new Vector2(0, strip.GroundY - G));
-        _mushroomSource = SourceRoot();
-        _mushroomSource.Children.InsertAtTop(_mushroomVisual);
         _layers[1] = Layer(strip.BackGrass);
         _layers[2] = Layer(strip.BackGrass);
         _layers[FrontLayer] = Layer(strip.FrontGrass);
 
         Generate();
-        FinishBuckets();
-        (_mushroomSprite, _mushroomSurface, _mushroomBrush) = Cached(_mushroomSource, 0, strip.GroundY - G - 2f, strip.Width, G + 4f);
-        mushroomSlot.Children.InsertAtTop(_mushroomSprite);
+        if (config.Cache)
+        {
+            FinishBuckets();
+            var (source, content) = SourceTree();
+            content.Children.InsertAtTop(_mushroomVisual);
+            _mushroomSource = source;
+            (_mushroomSprite, _mushroomSurface, _mushroomBrush, _) = Cached(source, 0, strip.Width);
+            mushroomSlot.Children.InsertAtTop(_mushroomSprite);
+        }
+        else
+        {
+            mushroomSlot.Children.InsertAtTop(_mushroomVisual);
+        }
         _clock.Stopped += OnClockStopped;
         ApplyPalette(brushes.Palette, animate: false);
         Log.Write($"grass: {_blades.Count} blades, {_groups.Count} groups, {_buckets.Count} sway buckets, {_mushrooms.Count} mushrooms, {s_paths.Count} cached paths in {sw.ElapsedMilliseconds} ms");
@@ -239,7 +255,7 @@ internal sealed class GrassField : IDisposable
         groups[key] = g;
         _groups.Add(g);
         var bucket = BucketFor(layer, centerX);
-        bucket.Source.Children.InsertAtTop(visual);
+        bucket.Content.Children.InsertAtTop(visual);
         bucket.Left = MathF.Min(bucket.Left, left);
         bucket.Right = MathF.Max(bucket.Right, left + segW + 2 * Pad);
         return g;
@@ -254,9 +270,22 @@ internal sealed class GrassField : IDisposable
         long key = ((long)layer << 32) | (uint)index;
         if (_bucketIndex.TryGetValue(key, out var b)) return b;
         float center = origin + (index + 0.5f) * width;
+        ContainerVisual content;
+        ContainerVisual? source = null;
+        if (_config.Cache)
+        {
+            (source, content) = SourceTree();
+        }
+        else
+        {
+            content = Anim.C.CreateContainerVisual();
+            _layers[layer].Children.InsertAtTop(content);
+        }
         b = new Bucket
         {
-            Source = SourceRoot(),
+            Content = content,
+            Source = source,
+            Pivot = _strip.GroundY,
             CenterX = center,
             Layer = layer,
             P1 = center / 140f + layer * 0.9f + _rng.Range(0f, 0.8f),
@@ -269,40 +298,57 @@ internal sealed class GrassField : IDisposable
 
     /// <summary>
     /// Shows each bucket through a cached texture. DWM re-rasterizes ShapeVisual vector content whenever it
-    /// falls in a dirty region (anything moving nearby), so static grass must live in a VisualSurface:
-    /// it re-renders only when its own blades change, and ambient sway just shears the texture.
+    /// falls in a dirty region (anything moving nearby), so static grass lives in a VisualSurface: it
+    /// re-renders only while its own blades change, and ambient sway just shears the texture.
     /// </summary>
     private void FinishBuckets()
     {
-        float top = _strip.GroundY - G - 2f, height = G + 4f;
         foreach (var b in _buckets)
         {
-            float left = MathF.Floor(b.Left - SurfaceMargin), width = MathF.Ceiling(b.Right + SurfaceMargin) - left;
-            (b.Sprite, b.Surface, b.Brush) = Cached(b.Source, left, top, width, height);
+            (b.Sprite, b.Surface, b.Brush, b.Pivot) = Cached(b.Source!, b.Left - SurfaceMargin, b.Right + SurfaceMargin);
             _layers[b.Layer].Children.InsertAtTop(b.Sprite);
         }
     }
 
-    /// <summary>
-    /// An unparented root that a VisualSurface renders. The surface works in the root's local DIPs and DWM
-    /// picks the raster resolution itself (pre-scaling the content made no difference), so no scaler is needed.
-    /// </summary>
-    private static ContainerVisual SourceRoot() => Anim.C.CreateContainerVisual();
+    /// <summary>Device pixels per DIP on this strip's monitor; cached sources are laid out in device pixels.</summary>
+    private float CacheScale => _strip.Scale;
 
-    private static (SpriteVisual, CompositionVisualSurface, CompositionSurfaceBrush) Cached(Visual source, float left, float top, float width, float height)
+    /// <summary>
+    /// An unparented root for a VisualSurface. The surface ignores the root's own transform, so a child
+    /// scales the DIP content to device pixels and the texture maps 1:1 onto the screen.
+    /// </summary>
+    private (ContainerVisual Root, ContainerVisual Content) SourceTree()
+    {
+        var root = Anim.C.CreateContainerVisual();
+        var content = Anim.C.CreateContainerVisual();
+        float k = CacheScale;
+        content.Scale = new Vector3(k, k, 1);
+        root.Children.InsertAtTop(content);
+        return (root, content);
+    }
+
+    /// <summary>
+    /// A sprite showing the grass band of <paramref name="source"/> between <paramref name="left"/> and
+    /// <paramref name="right"/> (DIPs), snapped to whole device pixels so the texture isn't resampled.
+    /// Returns the ground line in the sprite's local DIPs (the sway pivot).
+    /// </summary>
+    private (SpriteVisual Sprite, CompositionVisualSurface Surface, CompositionSurfaceBrush Brush, float Pivot) Cached(Visual source, float left, float right)
     {
         var c = Anim.C;
+        float k = CacheScale;
+        float x0 = MathF.Floor(left * k), x1 = MathF.Ceiling(right * k);
+        float y0 = MathF.Floor((_strip.GroundY - G - 2f) * k), y1 = MathF.Ceiling((_strip.GroundY + 2f) * k);
         var surface = c.CreateVisualSurface();
         surface.SourceVisual = source;
-        surface.SourceOffset = new Vector2(left, top);
-        surface.SourceSize = new Vector2(width, height);
+        surface.SourceOffset = new Vector2(x0, y0);
+        surface.SourceSize = new Vector2(x1 - x0, y1 - y0);
         var brush = c.CreateSurfaceBrush(surface);
         brush.Stretch = CompositionStretch.Fill;
         var sprite = c.CreateSpriteVisual();
         sprite.Brush = brush;
-        sprite.Size = new Vector2(width, height);
-        sprite.Offset = new Vector3(left, top, 0);
-        return (sprite, surface, brush);
+        sprite.Size = new Vector2((x1 - x0) / k, (y1 - y0) / k);
+        sprite.Offset = new Vector3(x0 / k, y0 / k, 0);
+        return (sprite, surface, brush, _strip.GroundY - y0 / k);
     }
 
     private void StartGroup(Group g)
@@ -333,7 +379,8 @@ internal sealed class GrassField : IDisposable
                 _sway.SetScalarParameter("p1", b.P1);
                 _sway.SetScalarParameter("p2", b.P2);
                 _sway.SetScalarParameter("xk", b.CenterX / 260f);
-                b.Sprite!.StartAnimation("TransformMatrix", _sway);
+                _sway.SetScalarParameter("H", b.Pivot);
+                b.Swayer.StartAnimation("TransformMatrix", _sway);
             }
             return;
         }
@@ -344,8 +391,8 @@ internal sealed class GrassField : IDisposable
             _ambientOn = false;
             foreach (var b in _buckets)
             {
-                b.Sprite!.StopAnimation("TransformMatrix");
-                b.Sprite.TransformMatrix = Matrix4x4.Identity;
+                b.Swayer.StopAnimation("TransformMatrix");
+                b.Swayer.TransformMatrix = Matrix4x4.Identity;
             }
         });
     }
@@ -769,23 +816,22 @@ internal sealed class GrassField : IDisposable
             g.Props.StopAnimation("Th");
             g.Visual.StopAnimation("TransformMatrix");
         }
-        foreach (var b in _buckets) b.Sprite?.StopAnimation("TransformMatrix");
+        foreach (var b in _buckets) b.Swayer.StopAnimation("TransformMatrix");
+        // Close everything this field put in the strip's layers (shapes included), then the cached sources.
+        var owned = new List<Visual>(_strip.BackGrass.Children);
+        owned.AddRange(_strip.FrontGrass.Children);
         _strip.BackGrass.Children.RemoveAll();
         _strip.FrontGrass.Children.RemoveAll();
-        foreach (var g in _groups) g.Visual.Dispose();
+        foreach (var v in owned) Shapes.DisposeTree(v);
         foreach (var b in _buckets)
         {
-            b.Sprite?.Dispose();
             b.Brush?.Dispose();
             b.Surface?.Dispose();
-            b.Source.Children.RemoveAll();
-            b.Source.Dispose();
+            if (b.Source != null) Shapes.DisposeTree(b.Source);
         }
-        _mushroomSprite.Dispose();
-        _mushroomBrush.Dispose();
-        _mushroomSurface.Dispose();
-        _mushroomSource.Children.RemoveAll();
-        _mushroomSource.Dispose();
+        _mushroomBrush?.Dispose();
+        _mushroomSurface?.Dispose();
+        if (_mushroomSource != null) Shapes.DisposeTree(_mushroomSource);
         _groups.Clear();
         _buckets.Clear();
         _bucketIndex.Clear();
