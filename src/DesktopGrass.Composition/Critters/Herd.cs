@@ -56,23 +56,32 @@ internal sealed class Herd : IDisposable
         if (w >= 600) kinds.Add("cat");
         if (w >= 1000) kinds.Add("bunny");
         if (w >= 3000 || (w >= 1400 && _rng.Chance(0.55f))) kinds.Add("hedgehog");
+        int raccoons = w >= 1200 ? _rng.Int(2, 4) : w >= 600 ? 1 : 0;
+        for (int i = 0; i < raccoons; i++) kinds.Add("raccoon");
 
         // Spread them out: each critter gets its own slot of the strip, in random order.
         int n = kinds.Count;
         int[] slots = Enumerable.Range(0, n).OrderBy(_ => _rng.Next()).ToArray();
         float slotWidth = (w - 160f) / n;
-        var used = new HashSet<string>();
+        var used = new HashSet<string> { Raccoon.Jimothy };
+        bool haveJimothy = false;
         for (int i = 0; i < n; i++)
         {
             float x = 80f + slotWidth * (slots[i] + _rng.Range(0.25f, 0.75f));
             var r = new Rng(_rng.NextU64());
-            Critter c = kinds[i] switch
+            Critter c;
+            switch (kinds[i])
             {
-                "sheep" => new Sheep(this, r, Pick(Sheep.Names, used), x, _rng.Range(14f, 26f)),
-                "cat" => new Cat(this, r, Pick(Cat.Names, used), x, _rng.Range(10f, 22f), _rng.Int(0, Cat.CoatCount)),
-                "bunny" => new Bunny(this, r, Pick(Bunny.Names, used), x, _rng.Range(22f, 38f)),
-                _ => new Hedgehog(this, r, Pick(Hedgehog.Names, used), x, _rng.Range(4f, 8f)),
-            };
+                case "sheep": c = new Sheep(this, r, Pick(Sheep.Names, used), x, _rng.Range(14f, 26f)); break;
+                case "cat": c = new Cat(this, r, Pick(Cat.Names, used), x, _rng.Range(10f, 22f), _rng.Int(0, Cat.CoatCount)); break;
+                case "bunny": c = new Bunny(this, r, Pick(Bunny.Names, used), x, _rng.Range(22f, 38f)); break;
+                case "raccoon":
+                    // Every raccoon gang has exactly one Jimothy.
+                    c = new Raccoon(this, r, haveJimothy ? Pick(Raccoon.Names, used) : Raccoon.Jimothy, x, _rng.Range(8f, 13f));
+                    haveJimothy = true;
+                    break;
+                default: c = new Hedgehog(this, r, Pick(Hedgehog.Names, used), x, _rng.Range(4f, 8f)); break;
+            }
             _critters.Add(c);
         }
     }

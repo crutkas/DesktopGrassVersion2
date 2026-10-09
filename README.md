@@ -22,8 +22,9 @@ src\DesktopGrass.Composition\bin\Release\net10.0-windows10.0.19041.0\win-arm64\D
 
 - **Move the mouse** through the grass to push it around; it springs back. Hover near an animal to see its name.
 - **Click** the grass to cut a patch (clippings fly; it regrows in a minute or so); click a **mushroom** to make it boing.
-- **Click near the animals**: sheep hop away, bunnies bolt, the hedgehog curls into a spiky ball, and the cat
-  pounces on the spot (click the cat itself and it purrs).
+- **Click near the animals**: sheep hop away, bunnies bolt, raccoons scurry off, the hedgehog curls into a spiky
+  ball, and the cat pounces on the spot. Click the cat itself and it purrs; poke a raccoon and it rears up on its
+  hind legs first.
 - **Tray icon** (right-click): Scene, Motion (Full, or Calm which only reacts to you), Critters, Butterflies,
   fireflies and birds, Send a gust, Send birds, Pause, Quit. Double-click the icon to pause.
 
@@ -36,7 +37,7 @@ locked. Settings are saved to `%LOCALAPPDATA%\DesktopGrass.Composition\state.jso
 | | |
 | --- | --- |
 | **Grass** | Filled, tapered gradient blades in 4 depth layers, flowers, mushrooms, a soft turf line. Ambient sway, mouse gusts with damped springs, cuts with flying clippings and staggered regrowth, mushroom boing. |
-| **Critters** | Sheep (wander, graze, nap, frolic, greet each other with a heart), a cat in one of six coats (sits and watches, loafs for long naps, pounces at clicks, purrs when clicked), a bunny that only ever hops, and a hedgehog that snuffles and curls into a ball. Name tags on hover; Zzz when asleep. In Calm they doze and peek at you when you hover. |
+| **Critters** | Sheep (wander, graze, nap, frolic, greet each other with a heart), a cat in one of six coats (sits and watches, loafs for long naps, pounces at clicks, purrs when clicked), a bunny that only ever hops, a hedgehog that snuffles and curls into a ball, and a gang of 2–3 raccoons that waddle, snuffle and rest. Every gang has exactly one Jimothy, who is shorter and rounder than the rest. Name tags on hover; Zzz when asleep. In Calm they doze and peek at you when you hover. |
 | **Sky** | Butterflies (5 wing styles, flap-and-glide), blinking fireflies, and V-formation bird flocks (~15 per hour per monitor). |
 | **Scenes** | Meadow; Desert (cacti, tumbleweeds); Winter (snow, snowy pines); Autumn (falling leaves, pumpkins); Ocean (bubbles, fish, coral). Switching scenes sweeps the new palette across the grass. Critters live in Meadow, Autumn and Winter. |
 

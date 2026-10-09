@@ -11,7 +11,7 @@ using Windows.UI.Composition;
 
 namespace DesktopGrass.Composition;
 
-internal enum Mood { Walk, Graze, Idle, Sleep, Hop, Flee, Greet, Pounce, Curl, Doze }
+internal enum Mood { Walk, Graze, Idle, Sleep, Hop, Flee, Greet, Pounce, Curl, Doze, Stand }
 
 internal abstract class Critter : IDisposable
 {

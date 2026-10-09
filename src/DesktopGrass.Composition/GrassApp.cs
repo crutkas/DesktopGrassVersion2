@@ -384,14 +384,14 @@ internal sealed class GrassApp : IDisposable
         if (field.TryFindMushroom(x1 + 200f, out float mx))
             _scheduler.After(2.6, () => Log.Write($"demo boing at {mx:F0} hit: {field.Click(mx, strip.GroundY - 3f)}"));
 
-        // Poke every critter: pat the cat, startle the rest.
+        // Poke every critter: pat the cat and Jimothy, startle the rest.
         _scheduler.After(2.9, () =>
         {
             var herd = _lives.Count > 0 ? _lives[0].Herd : null;
             if (herd == null) return;
             foreach (var c in herd.Critters)
             {
-                bool pat = c is Cat;
+                bool pat = c is Cat or Raccoon { IsJimothy: true };
                 var p = new Vector2(pat ? c.X : c.X + 30f, strip.GroundY - (pat ? c.BodyHeight * 0.5f : 6f));
                 Log.Write($"demo {(pat ? "pat" : "poke near")} {c.Name} the {c.Species}: direct hit {herd.Click(p)}");
             }
