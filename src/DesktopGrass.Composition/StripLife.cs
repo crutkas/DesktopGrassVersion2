@@ -29,18 +29,19 @@ internal sealed class StripLife : IDisposable
     public Herd? Herd => _herd;
 
     /// <summary>Scenes with ground critters (the others have their own residents: fish, tumbleweeds).</summary>
-    public static bool HasCritters(SceneKind scene) => scene is SceneKind.Meadow or SceneKind.Autumn or SceneKind.Winter;
+    public static bool HasCritters(SceneKind scene) => scene is SceneKind.Meadow or SceneKind.Autumn or SceneKind.Winter or SceneKind.City;
 
     public void Apply(SceneKind scene, MotionMode motion, bool critters, bool sky)
     {
         if (_disposed) return;
         bool wantHerd = critters && HasCritters(scene);
-        if (wantHerd && _herd == null) _herd = new Herd(_strip, _grass, _scheduler, new Rng(_rng.NextU64()), motion);
-        else if (!wantHerd && _herd != null)
+        // Moving between town and country swaps the whole cast (the old one fades out).
+        if (_herd != null && (!wantHerd || _herd.City != (scene == SceneKind.City)))
         {
             _herd.Retire();
             _herd = null;
         }
+        if (wantHerd && _herd == null) _herd = new Herd(_strip, _grass, _scheduler, new Rng(_rng.NextU64()), motion, scene);
         else _herd?.SetMotion(motion);
         _sky.Apply(scene, motion, sky);
         _ambience.Apply(scene, motion);
@@ -52,6 +53,8 @@ internal sealed class StripLife : IDisposable
     public bool Click(Vector2 p) => _herd?.Click(p) ?? false;
 
     public void SendBirds() => _sky.Flock();
+
+    public void SendTrain() => _ambience.SendTrain();
 
     public void Dispose()
     {

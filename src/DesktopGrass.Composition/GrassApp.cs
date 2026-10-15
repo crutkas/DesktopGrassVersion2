@@ -100,6 +100,7 @@ internal sealed class GrassApp : IDisposable
 
         if (_options.Demo) RunDemo();
         if (_options.BirdsNow) _scheduler.After(0.5, SendBirds);
+        if (_options.TrainNow) _scheduler.After(0.8, SendTrain);
         ScheduleSnapshots();
         if (_options.ExitAfter > 0) _scheduler.After(_options.ExitAfter, Quit);
         Log.Write($"started: scene {Palette.Name}, motion {Motion}, seed {_seed}");
@@ -331,6 +332,14 @@ internal sealed class GrassApp : IDisposable
         }
     }
 
+    public void SendTrain()
+    {
+        for (int i = 0; i < _lives.Count; i++)
+        {
+            if (_strips[i].Window.Visible) _lives[i].SendTrain();
+        }
+    }
+
     public void SetMotion(MotionMode mode)
     {
         Motion = mode;
@@ -410,7 +419,7 @@ internal sealed class GrassApp : IDisposable
 
         // Exercise every tray command once.
         _scheduler.After(3.6, GustNow);
-        _scheduler.After(4.2, () => SetScene(Palette.Kind == SceneKind.Autumn ? SceneKind.Meadow : SceneKind.Autumn));
+        _scheduler.After(4.2, () => SetScene(Palette.Kind == SceneKind.City ? SceneKind.Meadow : SceneKind.City));
         _scheduler.After(4.8, () => SetMotion(MotionMode.Calm));
         _scheduler.After(5.2, () => SetMotion(MotionMode.Full));
         _scheduler.After(5.4, () => SetPaused(true));

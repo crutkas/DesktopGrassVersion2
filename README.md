@@ -26,7 +26,7 @@ src\DesktopGrass.Composition\bin\Release\net10.0-windows10.0.19041.0\win-arm64\D
   ball, and the cat pounces on the spot. Click the cat itself and it purrs; poke a raccoon and it rears up on its
   hind legs first.
 - **Tray icon** (right-click): Scene, Motion (Full, or Calm which only reacts to you), Critters, Butterflies,
-  fireflies and birds, Send a gust, Send birds, Pause, Quit. Double-click the icon to pause.
+  fireflies and birds, Send a gust, Send birds, Send the L train (City), Pause, Quit. Double-click the icon to pause.
 
 The overlay is click-through, sits above the taskbar on every monitor, and hides itself for fullscreen apps.
 Calm motion is used automatically when Windows animations are off, on battery saver, or while the session is
@@ -39,7 +39,8 @@ locked. Settings are saved to `%LOCALAPPDATA%\DesktopGrass.Composition\state.jso
 | **Grass** | Filled, tapered gradient blades in 4 depth layers, flowers, mushrooms, a soft turf line. Ambient sway, mouse gusts with damped springs, cuts with flying clippings and staggered regrowth, mushroom boing. |
 | **Critters** | Sheep (wander, graze, nap, frolic, greet each other with a heart), a cat in one of six coats (sits and watches, loafs for long naps, pounces at clicks, purrs when clicked), a bunny that only ever hops, a hedgehog that snuffles and curls into a ball, and a gang of 2–3 raccoons that waddle, snuffle and rest. Every gang has exactly one Jimothy, who is shorter and rounder than the rest. Name tags on hover; Zzz when asleep. In Calm they doze and peek at you when you hover. |
 | **Sky** | Butterflies (5 wing styles, flap-and-glide), blinking fireflies, and V-formation bird flocks (~15 per hour per monitor). |
-| **Scenes** | Meadow; Desert (cacti, tumbleweeds); Winter (snow, snowy pines); Autumn (falling leaves, pumpkins); Ocean (bubbles, fish, coral). Switching scenes sweeps the new palette across the grass. Critters live in Meadow, Autumn and Winter. |
+| **Scenes** | Meadow; Desert (cacti, tumbleweeds); Winter (snow, snowy pines); Autumn (falling leaves, pumpkins); Ocean (bubbles, fish, coral); City (see below). Switching scenes sweeps the new palette across the grass. Critters live in Meadow, Autumn, Winter and the City. |
+| **City** | New York meets Chicago: a skyline mixing the Empire State, Chrysler and One World Trade Center with the Willis Tower, John Hancock Center and Marina City, rooftop water towers and lit windows; the elevated L with stainless trains rumbling by; a Ferris wheel; and the Bean in a tulip-lined park. The cast is city folk: pigeon flocks that bob along and clatter off when startled, a bodega cat, and the raccoons (Jimothy included). |
 
 ## How it works
 
@@ -117,7 +118,7 @@ Lessons:
 ## Flags
 
 `--scene <name>`, `--motion full|calm`, `--log` (writes `log.txt` next to the settings), `--demo` (scripted
-gust, cut, boing, critter pokes and tray commands), `--birds-now`, `--no-hook`, `--no-settings`, `--seed <n>`,
+gust, cut, boing, critter pokes and tray commands), `--birds-now`, `--train-now`, `--no-hook`, `--no-settings`, `--seed <n>`,
 `--exit-after <s>`, `--snapshot <png> --snapshot-after <s,s,...> --snapshot-strip <i>`.
 Measurement knobs: `--no-critters`, `--no-sky`, `--no-sway` (no ambient sway or puffs), `--no-grass`,
 `--bucket <dip>`, `--seg <dip>`, `--front-seg <dip>`, `--density <x>`.

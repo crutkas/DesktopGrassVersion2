@@ -267,6 +267,9 @@ internal readonly unsafe struct Painter
     [StructLayout(LayoutKind.Sequential)]
     private struct RoundedRectF { public float Left, Top, Right, Bottom, RadiusX, RadiusY; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RectF { public float Left, Top, Right, Bottom; }
+
     private readonly IntPtr _ctx;
     private readonly Matrix3x2 _base;
 
@@ -304,6 +307,49 @@ internal readonly unsafe struct Painter
     {
         var rr = new RoundedRectF { Left = x, Top = y, Right = x + w, Bottom = y + h, RadiusX = r, RadiusY = r };
         ((delegate* unmanaged<IntPtr, RoundedRectF*, IntPtr, void>)Vt[19])(_ctx, &rr, brush); // FillRoundedRectangle
+    }
+
+    public void Rect(float x, float y, float w, float h, IntPtr brush)
+    {
+        var r = new RectF { Left = x, Top = y, Right = x + w, Bottom = y + h };
+        ((delegate* unmanaged<IntPtr, RectF*, IntPtr, void>)Vt[17])(_ctx, &r, brush); // FillRectangle
+    }
+
+    public void Line(float x1, float y1, float x2, float y2, float width, IntPtr brush) =>
+        ((delegate* unmanaged<IntPtr, D2DPoint, D2DPoint, IntPtr, float, IntPtr, void>)Vt[15])(
+            _ctx, new D2DPoint(x1, y1), new D2DPoint(x2, y2), brush, width, IntPtr.Zero); // DrawLine
+
+    public void StrokeEllipse(float cx, float cy, float rx, float ry, float width, IntPtr brush)
+    {
+        var e = new EllipseF { Center = new D2DPoint(cx, cy), RadiusX = rx, RadiusY = ry };
+        ((delegate* unmanaged<IntPtr, EllipseF*, IntPtr, float, IntPtr, void>)Vt[20])(_ctx, &e, brush, width, IntPtr.Zero); // DrawEllipse
+    }
+
+    /// <summary>Fills with a multi-stop linear gradient (geometry space). The brush is made for this one fill and released.</summary>
+    public void FillGradient(IntPtr geometry, Vector2 from, Vector2 to, params (float Position, Color Color)[] colors)
+    {
+        var stops = stackalloc GradientStop[colors.Length];
+        for (int i = 0; i < colors.Length; i++) stops[i] = new GradientStop { Position = colors[i].Position, Color = F(colors[i].Color) };
+        IntPtr collection = Stops(stops, (uint)colors.Length);
+        IntPtr brush;
+        try
+        {
+            var lp = new LinearProperties { Start = new D2DPoint(from.X, from.Y), End = new D2DPoint(to.X, to.Y) };
+            var props = new BrushProperties { Opacity = 1, Transform = Matrix3x2.Identity };
+            D2D.Check(((delegate* unmanaged<IntPtr, LinearProperties*, BrushProperties*, IntPtr, IntPtr*, int>)Vt[10])(_ctx, &lp, &props, collection, &brush)); // CreateLinearGradientBrush
+        }
+        finally
+        {
+            Marshal.Release(collection);
+        }
+        try
+        {
+            Fill(geometry, brush);
+        }
+        finally
+        {
+            Marshal.Release(brush);
+        }
     }
 
     // ---------------------------------------------------------------- brushes (cached per device)

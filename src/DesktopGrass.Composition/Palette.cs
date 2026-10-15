@@ -5,7 +5,7 @@ using Windows.UI;
 
 namespace DesktopGrass.Composition;
 
-internal enum SceneKind { Meadow, Desert, Winter, Autumn, Ocean }
+internal enum SceneKind { Meadow, Desert, Winter, Autumn, Ocean, City }
 
 internal sealed class Palette
 {
@@ -84,7 +84,22 @@ internal sealed class Palette
         MushroomChance = 0.02f,
     };
 
-    public static readonly Palette[] All = { Meadow, Desert, Winter, Autumn, Ocean };
+    public static readonly Palette City = new()
+    {
+        Kind = SceneKind.City,
+        Name = "City",
+        // A mown park lawn (Central Park meets Grant Park), a little cooler than the meadow.
+        Blades = Hexes(0x2E5A27, 0x3B6E30, 0x4A8139, 0x5A9244, 0x6AA250, 0x7DB262),
+        // Tulip beds, as on Park Avenue and Michigan Avenue.
+        Flowers = Hexes(0xE8434B, 0xF6C445, 0xF28CB1, 0xFFFFFF, 0x9B6BD3, 0xF07F3C),
+        Caps = Hexes(0x8D6E63, 0xC9A66B, 0x6D4C41, 0xA1887F, 0xBCAAA4, 0x795548),
+        BaseShade = 0.5f,
+        FlowerChance = 0.035f,
+        MushroomChance = 0.008f,
+        GrassHeight = 0.8f,
+    };
+
+    public static readonly Palette[] All = { Meadow, Desert, Winter, Autumn, Ocean, City };
 
     public static Palette From(SceneKind kind) => All.First(p => p.Kind == kind);
 

@@ -19,6 +19,7 @@ internal sealed class Options
     public bool NoCritters;
     public bool NoSky;
     public bool BirdsNow;
+    public bool TrainNow;
     public bool NoSettings;
     public bool NoHook;
     public bool Demo;
@@ -53,6 +54,7 @@ internal sealed class Options
                 case "--no-critters": o.NoCritters = true; break;
                 case "--no-sky": o.NoSky = true; break;
                 case "--birds-now": o.BirdsNow = true; break;
+                case "--train-now": o.TrainNow = true; break;
                 case "--no-settings": o.NoSettings = true; break;
                 case "--no-hook": o.NoHook = true; break;
                 case "--demo": o.Demo = true; break;

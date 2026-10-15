@@ -1,5 +1,5 @@
 // Ambience.cs - per-scene weather and props for one strip: Winter snow and pines, Autumn leaves and
-// pumpkins, Ocean bubbles, fish and coral, Desert tumbleweeds and cacti.
+// pumpkins, Ocean bubbles, fish and coral, Desert tumbleweeds and cacti, and the City (see City.cs).
 //
 // Weather particles are small static-content visuals on seamless keyframe cycles that start at random
 // phases, so DWM only re-composes transforms. Props are static shapes behind the grass. In Calm mode the
@@ -17,8 +17,9 @@ internal sealed class Ambience : IDisposable
     private readonly Strip _strip;
     private readonly Scheduler _scheduler;
     private readonly Rng _rng;
-    private ContainerVisual? _weather, _swimmers, _props;
-    private TimerToken? _tumbleToken;
+    private ContainerVisual? _weather, _swimmers, _props, _park, _twinkles, _traffic;
+    private CityScape? _city;
+    private TimerToken? _tumbleToken, _trainToken;
     private SceneKind _scene;
     private MotionMode _motion;
     private bool _applied, _disposed;
@@ -45,16 +46,29 @@ internal sealed class Ambience : IDisposable
 
         if (sceneChanged)
         {
-            Retire(ref _props);
-            _props = BuildProps(scene);
+            // The city's textures go only after every layer showing them has faded out.
+            Fade(_city, _props, _park, _twinkles, _traffic);
+            _props = _park = _twinkles = _traffic = null;
+            _city = null;
+            BuildProps(scene);
         }
         if (sceneChanged || motionChanged)
         {
-            Retire(ref _weather);
-            Retire(ref _swimmers);
+            Fade(null, _weather, _swimmers, _twinkles, _traffic);
+            _weather = _swimmers = _twinkles = _traffic = null;
             _tumbleToken?.Cancel();
+            _trainToken?.Cancel();
             if (motion == MotionMode.Full) BuildWeather(scene);
+            _city?.SetWheelTurning(motion == MotionMode.Full);
         }
+    }
+
+    /// <summary>Sends an L train now (City only; works in Calm too, like "Send birds").</summary>
+    public void SendTrain()
+    {
+        if (_disposed || _scene != SceneKind.City || _city == null) return;
+        _traffic ??= NewLayer(_strip.BackDecor);
+        _city.SendTrain(_traffic);
     }
 
     private ContainerVisual NewLayer(ContainerVisual parent, bool atBottom = false)
@@ -67,23 +81,36 @@ internal sealed class Ambience : IDisposable
         return v;
     }
 
-    private void Retire(ref ContainerVisual? layer)
+    /// <summary>Fades the layers out together, then discards them and disposes <paramref name="owner"/>.</summary>
+    private static void Fade(IDisposable? owner, params ContainerVisual?[] layers)
     {
-        var old = layer;
-        layer = null;
-        if (old == null) return;
+        bool any = false;
         var batch = C.CreateScopedBatch(CompositionBatchTypes.Animation);
-        old.StartAnimation("Opacity", Anim.Scalar(0.9, Anim.EaseInOut, 1f, 0f));
+        foreach (var layer in layers)
+        {
+            if (layer == null) continue;
+            layer.StartAnimation("Opacity", Anim.Scalar(0.9, Anim.EaseInOut, 1f, 0f));
+            any = true;
+        }
         batch.End();
+        if (!any)
+        {
+            owner?.Dispose();
+            return;
+        }
         batch.Completed += (_, _) =>
         {
-            try
+            foreach (var layer in layers)
             {
-                Shapes.Discard(old);
+                try
+                {
+                    if (layer != null) Shapes.Discard(layer);
+                }
+                catch (Exception)
+                {
+                }
             }
-            catch (Exception)
-            {
-            }
+            owner?.Dispose();
         };
     }
 
@@ -111,7 +138,21 @@ internal sealed class Ambience : IDisposable
                 _swimmers = NewLayer(_strip.Critters);
                 _tumbleToken = _scheduler.After(_rng.Range(3f, 12f), TumbleTick);
                 break;
+            case SceneKind.City:
+                // Window lights sit behind the trains; both sit in front of the skyline.
+                _twinkles = NewLayer(_strip.BackDecor);
+                _city?.AddTwinkles(_twinkles);
+                _traffic = NewLayer(_strip.BackDecor);
+                _trainToken = _scheduler.After(_rng.Range(3f, 8f), TrainTick);
+                break;
         }
+    }
+
+    private void TrainTick()
+    {
+        if (_disposed || _scene != SceneKind.City || _city == null || _traffic == null) return;
+        if (_strip.Window.Visible) _city.SendTrain(_traffic);
+        _trainToken = _scheduler.After(_rng.Range(28f, 60f), TrainTick);
     }
 
     /// <summary>Linear travel from <paramref name="from"/> to <paramref name="to"/>, looping forever, starting at <paramref name="phase"/> of the cycle.</summary>
@@ -275,8 +316,15 @@ internal sealed class Ambience : IDisposable
 
     // ---------------------------------------------------------------- props
 
-    private ContainerVisual? BuildProps(SceneKind scene)
+    private void BuildProps(SceneKind scene)
     {
+        if (scene == SceneKind.City)
+        {
+            _props = NewLayer(_strip.BackDecor);
+            _park = NewLayer(_strip.Critters, atBottom: true);
+            _city = new CityScape(_strip, new Rng(_rng.NextU64()), _props, _park);
+            return;
+        }
         Func<float, Visual>? make = scene switch
         {
             SceneKind.Desert => Cactus,
@@ -285,13 +333,13 @@ internal sealed class Ambience : IDisposable
             SceneKind.Autumn => Pumpkin,
             _ => null,
         };
-        if (make == null) return null;
+        if (make == null) return;
         // Tall props stand behind the grass; short ones sit in front of it (behind the front tufts).
         var layer = NewLayer(scene == SceneKind.Autumn ? _strip.Critters : _strip.BackDecor, atBottom: scene == SceneKind.Autumn);
         float spacing = scene is SceneKind.Desert or SceneKind.Winter ? 520f : 420f;
         for (float x = _rng.Range(60f, spacing); x < W - 40f; x += spacing * _rng.Range(0.6f, 1.4f))
             layer.Children.InsertAtTop(make(x));
-        return layer;
+        _props = layer;
     }
 
     private ShapeVisual Prop(float x, float width, float height)
@@ -380,7 +428,8 @@ internal sealed class Ambience : IDisposable
         if (_disposed) return;
         _disposed = true;
         _tumbleToken?.Cancel();
-        foreach (var layer in new[] { _weather, _swimmers, _props })
+        _trainToken?.Cancel();
+        foreach (var layer in new[] { _weather, _swimmers, _props, _park, _twinkles, _traffic })
         {
             try
             {
@@ -390,6 +439,8 @@ internal sealed class Ambience : IDisposable
             {
             }
         }
+        _city?.Dispose();
+        _city = null;
     }
 
     public static void ResetCache()
