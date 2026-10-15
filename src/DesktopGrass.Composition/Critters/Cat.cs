@@ -10,6 +10,8 @@ namespace DesktopGrass.Composition;
 internal sealed class Cat : Critter
 {
     public static readonly string[] Names = { "Mittens", "Whiskers", "Shadow", "Ginger", "Smokey", "Boots", "Sage", "Juno" };
+    /// <summary>In town, the cat minds the corner bodega.</summary>
+    public static readonly string[] CityNames = { "Bodega", "Meatball", "Pickles", "Noodle", "Cannoli", "Biscotti" };
     public const int CoatCount = 6;
 
     private static readonly (uint Body, uint Dark, uint Eye, uint Whisker, bool Tabby)[] Coats =

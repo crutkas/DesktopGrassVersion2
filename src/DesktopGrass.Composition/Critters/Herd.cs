@@ -28,14 +28,17 @@ internal sealed class Herd : IDisposable
     public float MinX => 6f;
     public float MaxX => Strip.Width - 6f;
     public IReadOnlyList<Critter> Critters => _critters;
+    /// <summary>The town cast (pigeons, raccoons and a bodega cat) rather than the countryside one.</summary>
+    public bool City { get; }
 
-    public Herd(Strip strip, GrassField grass, Scheduler scheduler, Rng rng, MotionMode motion)
+    public Herd(Strip strip, GrassField grass, Scheduler scheduler, Rng rng, MotionMode motion, SceneKind scene)
     {
         Strip = strip;
         Grass = grass;
         Scheduler = scheduler;
         _rng = rng;
         Motion = motion;
+        City = scene == SceneKind.City;
         Layer = Anim.C.CreateContainerVisual();
         Layer.Opacity = 0;
         strip.Critters.Children.InsertAtTop(Layer);
@@ -51,15 +54,23 @@ internal sealed class Herd : IDisposable
     {
         float w = Strip.Width;
         var kinds = new List<string>();
-        int sheep = w >= 3000 ? 3 : w >= 900 ? 2 : 1;
-        for (int i = 0; i < sheep; i++) kinds.Add("sheep");
-        if (w >= 600) kinds.Add("cat");
-        if (w >= 1000) kinds.Add("bunny");
-        if (w >= 3000 || (w >= 1400 && _rng.Chance(0.55f))) kinds.Add("hedgehog");
+        if (City)
+        {
+            if (w >= 600) kinds.Add("cat");
+            for (int i = 0, flocks = w >= 3000 ? 2 : 1; i < flocks; i++) kinds.Add("pigeons");
+        }
+        else
+        {
+            int sheep = w >= 3000 ? 3 : w >= 900 ? 2 : 1;
+            for (int i = 0; i < sheep; i++) kinds.Add("sheep");
+            if (w >= 600) kinds.Add("cat");
+            if (w >= 1000) kinds.Add("bunny");
+            if (w >= 3000 || (w >= 1400 && _rng.Chance(0.55f))) kinds.Add("hedgehog");
+        }
         int raccoons = w >= 1200 ? _rng.Int(2, 4) : w >= 600 ? 1 : 0;
         for (int i = 0; i < raccoons; i++) kinds.Add("raccoon");
 
-        // Spread them out: each critter gets its own slot of the strip, in random order.
+        // Spread them out: each critter (or flock) gets its own slot of the strip, in random order.
         int n = kinds.Count;
         int[] slots = Enumerable.Range(0, n).OrderBy(_ => _rng.Next()).ToArray();
         float slotWidth = (w - 160f) / n;
@@ -73,13 +84,23 @@ internal sealed class Herd : IDisposable
             switch (kinds[i])
             {
                 case "sheep": c = new Sheep(this, r, Pick(Sheep.Names, used), x, _rng.Range(14f, 26f)); break;
-                case "cat": c = new Cat(this, r, Pick(Cat.Names, used), x, _rng.Range(10f, 22f), _rng.Int(0, Cat.CoatCount)); break;
+                case "cat":
+                    c = new Cat(this, r, Pick(City ? Cat.CityNames : Cat.Names, used), x, _rng.Range(10f, 22f), _rng.Int(0, Cat.CoatCount));
+                    break;
                 case "bunny": c = new Bunny(this, r, Pick(Bunny.Names, used), x, _rng.Range(22f, 38f)); break;
                 case "raccoon":
                     // Every raccoon gang has exactly one Jimothy.
                     c = new Raccoon(this, r, haveJimothy ? Pick(Raccoon.Names, used) : Raccoon.Jimothy, x, _rng.Range(8f, 13f));
                     haveJimothy = true;
                     break;
+                case "pigeons":
+                    var flock = new Pigeon.Flock { Home = x };
+                    for (int k = 0, size = _rng.Int(3, 6); k < size; k++)
+                    {
+                        float px = Math.Clamp(x + _rng.Range(-36f, 36f), MinX + 12f, MaxX - 12f);
+                        _critters.Add(new Pigeon(this, new Rng(_rng.NextU64()), Pick(Pigeon.Names, used), px, _rng.Range(9f, 15f), flock));
+                    }
+                    continue;
                 default: c = new Hedgehog(this, r, Pick(Hedgehog.Names, used), x, _rng.Range(4f, 8f)); break;
             }
             _critters.Add(c);

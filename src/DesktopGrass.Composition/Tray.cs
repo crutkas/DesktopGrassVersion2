@@ -54,6 +54,7 @@ internal sealed class Tray : IDisposable
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Send a gust", null, (_, _) => _app.GustNow()));
         _menu.Items.Add(new ToolStripMenuItem("Send birds", null, (_, _) => _app.SendBirds()));
+        if (_app.Palette.Kind == SceneKind.City) _menu.Items.Add(new ToolStripMenuItem("Send the L train", null, (_, _) => _app.SendTrain()));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Pause", null, (_, _) => _app.SetPaused(!_app.Paused)) { Checked = _app.Paused });
         _menu.Items.Add(new ToolStripMenuItem("Quit", null, (_, _) => _app.Quit()));
